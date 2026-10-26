@@ -76,6 +76,7 @@ class ProblemResult:
     notes: List[str] = field(default_factory=list)
     needs_review: bool = False
     review_reasons: List[str] = field(default_factory=list)
+    is_pending: bool = False
 
 
 @dataclass
@@ -89,4 +90,5 @@ class StudentGrade:
     comment: str = ""
     needs_review: bool = False
     review_reasons: List[str] = field(default_factory=list)
+    is_pending: bool = False
     optional_results: Dict[str, ProblemResult] = field(default_factory=dict)
