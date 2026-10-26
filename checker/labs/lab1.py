@@ -31,6 +31,7 @@ class Lab1Judge(BaseLabJudge):
         self.compiler = ProjectCompiler()
 
         # Lab 1-3 标准测试用例集: [(输入, 期望转换类型, 期望基准值)]
+        # 包含官方样例、边界值及动态金丝雀用例（防范硬编码全部样例答案的作弊行为）
         self.lab1_3_cases = [
             ("0 100\n", "Centigrade", 37.78),
             ("1 -6.67\n", "Fahrenheit", 19.99),
@@ -39,6 +40,9 @@ class Lab1Judge(BaseLabJudge):
             ("1 0\n", "Fahrenheit", 32.00),
             ("1 100\n", "Fahrenheit", 212.00),
             ("0 -40\n", "Centigrade", -40.00),
+            ("0 85.5\n", "Centigrade", 29.72),
+            ("1 25.0\n", "Fahrenheit", 77.00),
+            ("0 50.0\n", "Centigrade", 10.00),
         ]
 
     def grade_student(
@@ -78,6 +82,9 @@ class Lab1Judge(BaseLabJudge):
             for r in grade.problem_results.values():
                 grade.review_reasons.extend(r.review_reasons)
 
+        if any(r.is_pending for r in grade.problem_results.values()):
+            grade.is_pending = True
+
         if not files:
             grade.status = "missing"
             grade.total_score = 0.0
@@ -116,6 +123,7 @@ class Lab1Judge(BaseLabJudge):
 
         # --- A. 代码部分评测 (1.5分) ---
         code_score = 0.0
+        deduced_y = None
         if not sources:
             prob.notes.append("未找到 Lab 1-2 代码文件")
             prob.sub_scores["code"] = 0.0
@@ -127,9 +135,20 @@ class Lab1Judge(BaseLabJudge):
                 prob.review_reasons.append(f"同题多候选: {[s.name for s in sources]}")
 
             src_text = src_path.read_text(encoding="utf-8", errors="ignore")
-            # 源码运算符静态检查
+            # 源码静态检查：必须含有逻辑运算与位运算符
             has_logical = all(op in src_text for op in ["!", "||", "&&"])
             has_bitwise = all(op in src_text for op in ["~", "|", "&"])
+
+            # 静态提取代码中直接赋值的 x 和 y
+            m_x = re.search(r'\bx\s*=\s*(-?\d+)', src_text)
+            m_y = re.search(r'\by\s*=\s*(-?\d+)', src_text)
+            code_x_literal = int(m_x.group(1)) if m_x else None
+            code_y_literal = int(m_y.group(1)) if m_y else None
+
+            if code_x_literal is not None and code_x_literal != expected_x:
+                prob.notes.append(f"源码中 x 赋值 ({code_x_literal}) 与学号后两位 ({expected_x}) 不一致")
+                prob.needs_review = True
+                prob.review_reasons.append(f"代码 x 赋值为 {code_x_literal}，而学号末两位为 {expected_x}")
 
             c_res = self.compiler.compile(src_path, build_dir, "lab1_2")
             prob.compile_result = c_res
@@ -139,7 +158,6 @@ class Lab1Judge(BaseLabJudge):
                 prob.status = "compile_error"
                 prob.sub_scores["code"] = 0.0
             else:
-                # 运行程序并检查输出
                 exec_res = run_binary(c_res.binary_path, input_str="", timeout=2.0)
                 if exec_res.timed_out:
                     prob.notes.append("Lab 1-2 运行超时")
@@ -148,49 +166,61 @@ class Lab1Judge(BaseLabJudge):
                     prob.notes.append(f"Lab 1-2 运行时崩溃 (exit {exec_res.exit_code})")
                     prob.sub_scores["code"] = 0.0
                 else:
-                    # 解析程序输出的整数项
+                    # 解析程序输出的全部整数项
                     numbers = [int(n) for n in re.findall(r"-?\b\d+\b", exec_res.stdout)]
-                    # 预期输出 9 个数字
                     if len(numbers) >= 9:
                         v1, v2, v3 = numbers[0], numbers[1], numbers[2]
                         v4, v5, v6 = numbers[3], numbers[4], numbers[5]
                         v7, v8, v9 = numbers[6], numbers[7], numbers[8]
 
-                        # 验证 !x 的正确性 (x!=0时为0)
-                        not_x_correct = (v1 == (0 if expected_x != 0 else 1))
-                        # 验证 ~x 的无符号与有符号表示
-                        # 在 16 位 short 下，~expected_x 的 unsigned 为 65536 + (~expected_x)
-                        expected_tilde_unsigned = (65536 + (~expected_x)) & 0xFFFF
-                        expected_tilde_signed = (~expected_x)
-                        # C short 在 64位Linux可能被提升，但例程使用 %5hu 和 %5hd
-                        tilde_correct = (v4 == expected_tilde_unsigned and v7 == expected_tilde_signed)
-
-                        # 检验或运算与与运算的一致性: (x|y) + (x&y) == x + y
-                        # 若 x 对齐且位运算正确，推导 y = v5 + v6 - expected_x
+                        # 根据位运算恒等式 x + y = (x | y) + (x & y) 推导代码中的实际参数 y
                         deduced_y = v5 + v6 - expected_x
-                        or_and_consistent = (v5 == (expected_x | deduced_y) and v6 == (expected_x & deduced_y))
-                        or_and_consistent_line3 = (v8 == (expected_x | deduced_y) and v9 == (expected_x & deduced_y))
+                        if code_y_literal is not None and code_y_literal != deduced_y:
+                            prob.notes.append(f"代码字面 y={code_y_literal} 与运算输出推导 y={deduced_y} 存在偏差")
 
-                        if not_x_correct and tilde_correct and or_and_consistent and or_and_consistent_line3:
+                        # 理论预期 9 项全量计算
+                        exp_v1 = 0 if expected_x != 0 else 1
+                        exp_v2 = 1 if (expected_x != 0 or deduced_y != 0) else 0
+                        exp_v3 = 1 if (expected_x != 0 and deduced_y != 0) else 0
+                        exp_v4 = (65536 + (~expected_x)) & 0xFFFF
+                        exp_v5 = (expected_x | deduced_y)
+                        exp_v6 = (expected_x & deduced_y)
+                        exp_v7 = (~expected_x)
+                        exp_v8 = (expected_x | deduced_y)
+                        exp_v9 = (expected_x & deduced_y)
+
+                        # 逐项核验九个结果，杜绝漏查逻辑运算或局部假通过
+                        checks = [
+                            ("!x", v1 == exp_v1, v1, exp_v1),
+                            ("x||y", v2 == exp_v2, v2, exp_v2),
+                            ("x&&y", v3 == exp_v3, v3, exp_v3),
+                            ("~x(unsigned)", v4 == exp_v4, v4, exp_v4),
+                            ("x|y(line2)", v5 == exp_v5, v5, exp_v5),
+                            ("x&y(line2)", v6 == exp_v6, v6, exp_v6),
+                            ("~x(signed)", v7 == exp_v7, v7, exp_v7),
+                            ("x|y(line3)", v8 == exp_v8, v8, exp_v8),
+                            ("x&y(line3)", v9 == exp_v9, v9, exp_v9),
+                        ]
+
+                        passed_terms = sum(1 for _, ok, _, _ in checks if ok)
+                        failed_terms = [name for name, ok, _, _ in checks if not ok]
+
+                        if passed_terms == 9:
                             if has_logical and has_bitwise:
                                 code_score = 1.5
-                                prob.notes.append(f"代码逻辑与位运算校验完全正确 (x={expected_x}, 推导y={deduced_y})")
+                                prob.notes.append(f"代码逻辑与位运算 9 项校验完全正确 (x={expected_x}, 推导y={deduced_y})")
                             else:
-                                code_score = 0.8
-                                prob.notes.append("运算结果正确但源码中部分运算符疑似缺失，怀疑常数硬编码")
+                                code_score = 0.75
+                                prob.notes.append("9项运算输出正确，但源码缺少运算符，疑似直接打印常数")
                                 prob.needs_review = True
-                                prob.review_reasons.append("1-2 源码运算符静态检查未全通过")
+                                prob.review_reasons.append("1-2 源码运算符静态检查未通过")
                         else:
-                            # 局部正确给部分分
-                            part = 0.0
-                            if not_x_correct: part += 0.3
-                            if tilde_correct: part += 0.4
-                            if or_and_consistent: part += 0.3
-                            code_score = round(part, 2)
-                            prob.notes.append(f"代码输出与理论位运算不符 (x={expected_x})")
+                            # 逻辑运算如 ||, && 错误直接导致失分并记录
+                            code_score = round(1.5 * (passed_terms / 9.0), 2)
+                            prob.notes.append(f"代码运算有 {len(failed_terms)} 项不符预期: {', '.join(failed_terms)} (通过 {passed_terms}/9)")
                     else:
                         prob.notes.append(f"代码输出数字不足 9 个 (实际输出 {len(numbers)} 个)")
-                        code_score = 0.3
+                        code_score = 0.2
 
             prob.sub_scores["code"] = code_score
 
@@ -203,7 +233,48 @@ class Lab1Judge(BaseLabJudge):
             mock_mode=mock_ai,
         )
         prob.ai_review = ai_res
-        handwritten_score = round(float(ai_res.get("suggested_score", 0.0)), 2)
+        handwritten_score = 0.0
+        if ai_res.get("suggested_score") is not None:
+            handwritten_score = round(float(ai_res.get("suggested_score")), 2)
+        if ai_res.get("is_pending"):
+            prob.is_pending = True
+            prob.needs_review = True
+
+        # 参数一致性交叉核对（代码、手机号、演草纸）
+        hw_x = ai_res.get("x_observed")
+        hw_y = ai_res.get("y_observed")
+        hw_phone = ai_res.get("phone_observed")
+        if hw_y is None and hw_phone:
+            ph_digits = re.findall(r"\d+", str(hw_phone))
+            if ph_digits and len(ph_digits[-1]) >= 2:
+                try:
+                    hw_y = int(ph_digits[-1][-2:])
+                except ValueError:
+                    pass
+
+        if hw_x is not None and hw_x != expected_x:
+            prob.needs_review = True
+            prob.review_reasons.append(f"参数矛盾: 演草纸手写 x={hw_x} 与学号后两位 {expected_x} 不符")
+
+        if hw_y is not None and deduced_y is not None and hw_y != deduced_y:
+            prob.needs_review = True
+            prob.review_reasons.append(f"参数矛盾: 代码 y={deduced_y} 与演草纸手写 y={hw_y} 不一致")
+            # 扣除参数一致性子项得分
+            if handwritten_score > 0:
+                handwritten_score = max(0.0, round(handwritten_score - 0.2, 2))
+
+        if student.phone and len(student.phone) >= 2:
+            try:
+                roster_y = int(student.phone[-2:])
+                if deduced_y is not None and deduced_y != roster_y:
+                    prob.needs_review = True
+                    prob.review_reasons.append(f"代码 y={deduced_y} 与点名册手机号末两位 {roster_y} 不一致")
+                if hw_y is not None and hw_y != roster_y:
+                    prob.needs_review = True
+                    prob.review_reasons.append(f"演草纸 y={hw_y} 与点名册手机号末两位 {roster_y} 不一致")
+            except ValueError:
+                pass
+
         prob.sub_scores["handwritten"] = handwritten_score
         prob.notes.append(f"演草纸批改: {ai_res.get('reasoning', '')}")
 
@@ -211,9 +282,11 @@ class Lab1Judge(BaseLabJudge):
             prob.needs_review = True
             prob.review_reasons.append(f"演草纸复核: {ai_res.get('review_reason', '')}")
 
-        # 汇总分数
+        # 汇总分数与状态
         prob.score = round(code_score + handwritten_score, 2)
-        if prob.score >= 2.8:
+        if prob.is_pending:
+            prob.status = "needs_review"
+        elif prob.score >= 2.8:
             prob.status = "passed"
         elif prob.score > 0:
             prob.status = "partial"
@@ -255,9 +328,11 @@ class Lab1Judge(BaseLabJudge):
         passed_cases = 0
         total_cases = len(self.lab1_3_cases)
         has_int_div_bug = False
+        outputs_collected = []
 
         for idx, (in_str, conv_type, expected_val) in enumerate(self.lab1_3_cases, 1):
             exec_res = run_binary(c_res.binary_path, input_str=in_str, timeout=2.0)
+            outputs_collected.append(exec_res.stdout.strip())
 
             case_res = TestCaseResult(
                 case_id=f"case_{idx}",
@@ -277,27 +352,32 @@ class Lab1Judge(BaseLabJudge):
                 case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
             else:
                 # 提取输出中所有浮点数
-                floats = re.findall(r"-?\b\d+(?:\.\d+)?\b", exec_res.stdout)
+                floats = [float(fl) for fl in re.findall(r"-?\b\d+(?:\.\d+)?\b", exec_res.stdout)]
+
+                # 防作弊检测 1: 程序同时倾倒多个用例的标准参考答案
+                other_targets = [v for _, _, v in self.lab1_3_cases if abs(v - expected_val) > 0.1]
+                matches_other_targets = sum(1 for ot in other_targets if any(abs(f - ot) <= 0.08 for f in floats))
+                if matches_other_targets >= 2 or len(floats) >= 6:
+                    case_res.error_message = "检测到程序同时输出多个无关参考答案，判定作弊刷屏"
+                    prob.test_results.append(case_res)
+                    continue
+
+                # 识别本次输入对应的实际转换结果
                 found_match = False
-                for fl_str in floats:
-                    try:
-                        val = float(fl_str)
-                        if abs(val - expected_val) <= 0.08:
-                            found_match = True
-                            break
-                        # 检查整数除法陷阱 (如 5/9 截断为 0 导致结果为 0 或 32)
-                        if expected_val != 0.0 and abs(val - 0.0) < 0.001 and conv_type == "Centigrade":
-                            has_int_div_bug = True
-                    except ValueError:
-                        continue
+                for val in floats:
+                    if abs(val - expected_val) <= 0.08:
+                        found_match = True
+                        break
+                    # 检查整数除法陷阱 (如 5/9 截断为 0 导致结果为 0 或 32)
+                    if expected_val != 0.0 and abs(val - 0.0) < 0.001 and conv_type == "Centigrade":
+                        has_int_div_bug = True
 
                 if found_match:
                     case_res.passed = True
                     case_res.score = case_res.max_score
                     passed_cases += 1
                 else:
-                    # 确定性未匹配，调用语义复核判定是否因输出中包含复杂字符或格式偏差
-                    if not mock_ai and idx == 1:  # 仅对首个失败样本调用 AI 复核防超频
+                    if not mock_ai and idx == 1:
                         ai_sem = SemanticAmbiguityReviewer.review_output(
                             problem_id="1-3",
                             student_id=student.student_id,
@@ -319,6 +399,17 @@ class Lab1Judge(BaseLabJudge):
                             prob.needs_review = True
 
             prob.test_results.append(case_res)
+
+        # 防作弊检测 2: 检查不同输入下输出是否完全相同 (不读输入直接打印固定静态内容)
+        if len(outputs_collected) >= 2:
+            unique_outputs = set(outputs_collected)
+            if len(unique_outputs) == 1 and total_cases > 1:
+                prob.notes.append("检测到程序在不同输入下输出完全相同的静态文本，判定未读取输入")
+                passed_cases = 0
+                for cr in prob.test_results:
+                    cr.passed = False
+                    cr.score = 0.0
+                    cr.error_message = "静态输出检测失败：不同输入输出无变化"
 
         if has_int_div_bug:
             prob.notes.append("检测到典型 C 语言整型截断除法缺陷 (如 5*(fahr-32)/9 写成了 5/9*(fahr-32))")

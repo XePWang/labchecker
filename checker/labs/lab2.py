@@ -101,6 +101,9 @@ class Lab2Judge(BaseLabJudge):
             for r in grade.problem_results.values():
                 grade.review_reasons.extend(r.review_reasons)
 
+        if any(r.is_pending for r in grade.problem_results.values()):
+            grade.is_pending = True
+
         if not files:
             grade.status = "missing"
             grade.total_score = 0.0
@@ -253,7 +256,8 @@ class Lab2Judge(BaseLabJudge):
             ("C\n", 3, "ABCBA", False),
             ("f\n", 6, "ABCDEFEDCBA", False),  # 小写字母自动提升为大写
             ("A\n", 1, "A", False),
-            ("1\n", 0, "ERROR", True),         # 非字母错误提示
+            ("-\n", 0, "ERROR", True),         # 指导书 Sample 3 原样输入 '-'
+            ("1\n", 0, "ERROR", True),         # 常见非字母数字输入
             ("Z\n", 26, "ABCDEFGHIJKLMNOPQRSTUVWXYZYXWVUTSRQPONMLKJIHGFEDCBA", False),
         ]
 
@@ -285,30 +289,62 @@ class Lab2Judge(BaseLabJudge):
 
                 if is_error_test:
                     out_lower = exec_res.stdout.lower()
-                    if any(w in out_lower for w in ["not a letter", "error", "not", "非字母", "错误", "不是字母"]):
+                    error_keywords = [
+                        "invalid character", "invalid", "not a letter", "not letter",
+                        "error", "非字母", "错误", "不是字母", "不合法", "无效"
+                    ]
+                    if any(w in out_lower for w in error_keywords):
                         case_res.passed = True
                         case_res.score = case_res.max_score
                         passed_cases += 1
+                    else:
+                        case_res.error_message = "未能检测到非字母非法输入报错提示"
                 else:
-                    # 检查行数与序列
-                    # 过滤纯字母行比较
-                    letter_lines = ["".join(re.findall(r"[A-Za-z]", line)) for line in out_lines]
+                    # 构造本用例各行的完整理论预期对称序列
+                    target_ch = in_char.strip().upper()
+                    n_lines = ord(target_ch) - ord('A') + 1
 
-                    # 检查是否匹配指导书笔误 (ABCBC)
-                    if in_char.strip().upper() == "F" and any("ABCBC" in l for l in letter_lines):
-                        typo_detected = True
+                    expected_rows = []
+                    for row_i in range(1, n_lines + 1):
+                        up = "".join(chr(ord('A') + j) for j in range(row_i))
+                        down = "".join(chr(ord('A') + j) for j in range(row_i - 2, -1, -1))
+                        expected_rows.append(up + down)
 
-                    # 只要序列按字母对称展开
-                    if exp_final_seq in letter_lines or any(exp_final_seq in l for l in letter_lines):
-                        case_res.passed = True
-                        case_res.score = case_res.max_score
-                        passed_cases += 1
-                    elif len(letter_lines) == exp_lines and exp_final_seq.replace("ABCBA", "ABCBC") in letter_lines:
-                        # 严格复制指导书笔误 ABCBC 也判定通过
-                        case_res.passed = True
-                        case_res.score = case_res.max_score
-                        passed_cases += 1
-                        typo_detected = True
+                    # 提取纯英文字母行，过滤输入提示语干扰
+                    letter_rows = []
+                    for line in out_lines:
+                        clean_l = line.strip()
+                        if any(kw in clean_l.lower() for kw in ["input", "enter", "receiving", "请输入", "输入", "sample"]):
+                            continue
+                        seq = "".join(re.findall(r"[A-Za-z]", clean_l)).upper()
+                        if seq:
+                            letter_rows.append(seq)
+
+                    # 严格逐行验证：行数必须完全一致，且每行均需满足对称序列
+                    if len(letter_rows) == n_lines:
+                        all_rows_matched = True
+                        for r_idx in range(n_lines):
+                            exp_r = expected_rows[r_idx]
+                            actual_r = letter_rows[r_idx]
+                            if r_idx == 2:  # 第3行兼容指导书样例中的 ABCBC 笔误
+                                if actual_r == "ABCBC":
+                                    typo_detected = True
+                                if actual_r not in {"ABCBA", "ABCBC"}:
+                                    all_rows_matched = False
+                                    break
+                            else:
+                                if actual_r != exp_r:
+                                    all_rows_matched = False
+                                    break
+
+                        if all_rows_matched:
+                            case_res.passed = True
+                            case_res.score = case_res.max_score
+                            passed_cases += 1
+                        else:
+                            case_res.error_message = f"行内容未严格对称展开 (提取内容: {letter_rows[:3]}...)"
+                    else:
+                        case_res.error_message = f"金字塔总行数不符预期: 期望{n_lines}行, 实际检测到{len(letter_rows)}行"
 
             prob.test_results.append(case_res)
 
