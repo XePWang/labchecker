@@ -3,6 +3,7 @@ tests/test_checker.py
 判题机全覆盖单元与集成测试套件（完全脱敏，无任何硬编码个人真实数据）
 """
 import io
+import json
 import os
 import shutil
 import unittest
@@ -14,7 +15,7 @@ from checker.compiler import ProjectCompiler
 from checker.config import DEFAULT_ROSTER_PATH, DEFAULT_TEMPLATE_PATH, PROJECT_ROOT, WORK_DIR
 from checker.labs.lab1 import Lab1Judge
 from checker.labs.lab2 import Lab2Judge
-from checker.models import Student, StudentGrade, SubmissionFile
+from checker.models import ProblemResult, Student, StudentGrade, SubmissionFile, TestCaseResult
 from checker.reporter import LabReporter
 from checker.roster import RosterManager
 from checker.sandbox import run_binary
@@ -619,6 +620,280 @@ int main() {
         self.assertIn(f"{s2.student_id},{s2.name},5.00", roster_csv_text)
         self.assertIn(f"{s1.student_id},{s1.name},5.00", roster_csv_text)
 
+    def test_15_lab1_3_verbose_prompt_pass(self):
+        """测试 15: Lab 1-3 包含提示语 0: F→C; 1: C→F; C=5*(F-32)/9 的正确程序通过不被误判作弊"""
+        judge = Lab1Judge()
+        build_dir = self.test_work / "build_lab1_3_verbose"
+        s1 = self.roster_mgr.students[0]
+
+        # 包含较多数字提示语但计算完全正确的学生程序
+        verbose_code = """
+#include <stdio.h>
+int main() {
+    int mode;
+    double val, res;
+    // 提示信息中包含 0, 1, 5, 32, 9 等多个数字
+    printf("Please choose mode (0: F->C; 1: C->F; formula: C=5*(F-32)/9):\\n");
+    if (scanf("%d %lf", &mode, &val) != 2) return 1;
+    if (mode == 0) {
+        res = 5.0 * (val - 32.0) / 9.0;
+        printf("Fahrenheit %.2f to Centigrade is: %.2f\\n", val, res);
+    } else {
+        res = 9.0 * val / 5.0 + 32.0;
+        printf("Centigrade %.2f to Fahrenheit is: %.2f\\n", val, res);
+    }
+    return 0;
+}
+"""
+        p_verbose = self.test_work / "verbose_1_3.c"
+        p_verbose.write_text(verbose_code)
+
+        res = judge._grade_lab1_3(s1, [p_verbose], build_dir, mock_ai=True)
+        # 必须获得满分 2.0，不得被判定作弊
+        self.assertEqual(res.score, 2.0)
+        self.assertEqual(res.status, "passed")
+        for tr in res.test_results:
+            self.assertTrue(tr.passed, f"用例未通过: {tr.input_data} -> {tr.actual_output} (error: {tr.error_message})")
+
+    def test_16_detail_csv_multi_problem_and_recovery(self):
+        """测试 16: 明细表与单人报告导出所有题目，历史成绩恢复包含全部题目"""
+        output_dir = self.test_work / "output_multi_prob"
+        reporter = LabReporter("lab1", output_dir)
+        s1 = self.roster_mgr.students[0]
+
+        g = StudentGrade(student=s1, total_score=5.0, status="graded", comment="学生甲全对" + "。" * 40)
+        p1 = ProblemResult(problem_id="1-2", score=3.0, max_score=3.0, status="passed")
+        p2 = ProblemResult(problem_id="1-3", score=2.0, max_score=2.0, status="passed")
+        g.problem_results["1-2"] = p1
+        g.problem_results["1-3"] = p2
+
+        # 1. 批次全量明细表导出
+        rep_paths = reporter.generate_all_reports(self.roster_mgr.students, {s1.student_id: g})
+        detail_lines = rep_paths["detail_csv"].read_text(encoding="utf-8-sig").strip().splitlines()
+        # 需同时出现 1-2 与 1-3
+        s1_rows = [line for line in detail_lines if s1.student_id in line]
+        self.assertEqual(len(s1_rows), 2, f"明细表中学生 {s1.student_id} 行数应为2，实际为: {s1_rows}")
+        pids = [line.split(",")[8] for line in s1_rows]
+        self.assertIn("1-2", pids)
+        self.assertIn("1-3", pids)
+
+        # 2. 单人报告导出
+        single_paths = reporter.generate_single_student_report(s1, g)
+        single_lines = single_paths["detail_csv"].read_text(encoding="utf-8-sig").strip().splitlines()
+        single_s1_rows = [line for line in single_lines if s1.student_id in line]
+        self.assertEqual(len(single_s1_rows), 2)
+
+        # 3. 从历史文件恢复
+        recovered = reporter.load_existing_grades_from_files(self.roster_mgr.students)
+        self.assertIn(s1.student_id, recovered)
+        rec_g = recovered[s1.student_id]
+        self.assertIn("1-2", rec_g.problem_results)
+        self.assertIn("1-3", rec_g.problem_results)
+        self.assertEqual(rec_g.problem_results["1-2"].score, 3.0)
+        self.assertEqual(rec_g.problem_results["1-3"].score, 2.0)
+
+    def test_17_semantic_ai_timeout_pending_propagation(self):
+        """测试 17: AI 语义复核超时返回 is_pending=True，全链条保持成绩待定绝非数值成绩"""
+        judge = Lab1Judge()
+        build_dir = self.test_work / "build_sem_pending"
+        s1 = self.roster_mgr.students[0]
+
+        # 语义模糊程序（格式略有差异，不精确命中硬匹配，触发语义复核）
+        ambig_code = """
+#include <stdio.h>
+int main() {
+    int m;
+    double t;
+    scanf("%d %lf", &m, &t);
+    // 输出无法直接数值命中，触发语义复核
+    printf("Approximate temp conversion result is: 999.00\\n");
+    return 0;
+}
+"""
+        p_ambig = self.test_work / "ambig_1_3.c"
+        p_ambig.write_text(ambig_code)
+
+        from unittest.mock import patch
+        mock_sem_pending = {
+            "task_id": "semantic_1-3",
+            "category": "insufficient_evidence",
+            "passed": False,
+            "suggested_score": None,
+            "is_pending": True,
+            "reasoning": "AI 复核调度超时",
+            "needs_review": True,
+            "review_reason": "AI 调用超时，成绩待定",
+        }
+
+        with patch("checker.ai.SemanticAmbiguityReviewer.review_output", return_value=mock_sem_pending):
+            prob = judge._grade_lab1_3(s1, [p_ambig], build_dir, mock_ai=False)
+            self.assertTrue(prob.is_pending, "单题 is_pending 应为 True")
+            self.assertTrue(prob.needs_review, "单题 needs_review 应为 True")
+            self.assertEqual(prob.score, 0.0, "待定状态下数值得分应为 0.0 避免虚假出分")
+
+            grade = judge.grade_student(
+                s1,
+                [SubmissionFile(original_name=p_ambig.name, path=p_ambig, file_type="c_source", matched_problem="1-3")],
+                build_dir,
+                mock_ai=False,
+            )
+            self.assertTrue(grade.is_pending, "学生总评 is_pending 应为 True")
+            self.assertEqual(grade.status, "needs_review")
+
+            output_dir = self.test_work / "output_sem_pending"
+            reporter = LabReporter("lab1", output_dir)
+            rep_paths = reporter.generate_all_reports(self.roster_mgr.students, {s1.student_id: grade})
+
+            roster_csv_text = rep_paths["roster_csv"].read_text(encoding="utf-8-sig")
+            # 成绩单中必须写入 '待定'，绝不能写入 '0.20'
+            self.assertIn(f"{s1.student_id},{s1.name},待定", roster_csv_text)
+            self.assertNotIn(f"{s1.student_id},{s1.name},0.20", roster_csv_text)
+
+    def test_18_compiler_isolation_and_no_nameerror(self):
+        """测试 18: 编译器模块正常导入 shutil，支持隔离环境编译不抛出 NameError"""
+        compiler = ProjectCompiler()
+        build_dir = self.test_work / "build_compiler_iso"
+        p_simple = self.test_work / "simple.c"
+        p_simple.write_text("int main(){return 0;}")
+
+        # 编译应当顺利执行，无论系统中是否有 unshare 命令，均安全降级或使用隔离
+        c_res = compiler.compile(p_simple, build_dir, "simple_bin")
+        self.assertTrue(c_res.success)
+        self.assertTrue(c_res.binary_path.exists())
+
+    def test_19_consecutive_scanf_s_on_same_line(self):
+        """测试 19: MSVC scanf_s 垫片支持单行多次输入 (如 '0 100') 不消耗整行"""
+        compiler = ProjectCompiler()
+        build_dir = self.test_work / "build_scanf_consec"
+
+        code = """
+#include <stdio.h>
+int main() {
+    int mode = -1;
+    double temp = -999.0;
+    // 连续两次调用 scanf_s 读取同一行的两个数值
+    int r1 = scanf_s("%d", &mode);
+    int r2 = scanf_s("%lf", &temp);
+    printf("r1=%d mode=%d, r2=%d temp=%.2f\\n", r1, mode, r2, temp);
+    return 0;
+}
+"""
+        p_code = self.test_work / "consec_scanf.c"
+        p_code.write_text(code)
+
+        c_res = compiler.compile(p_code, build_dir, "consec_scanf")
+        self.assertTrue(c_res.success, f"编译失败: {c_res.stderr}")
+
+        exec_res = run_binary(c_res.binary_path, input_str="0 100\n")
+        self.assertEqual(exec_res.exit_code, 0)
+        self.assertIn("r1=1 mode=0, r2=1 temp=100.00", exec_res.stdout)
+
+    def test_20_mock_mode_grade_sheet_tagging(self):
+        """测试 20: 模拟模式输出加 mock_ 前缀并标明 [模拟] 与 [模拟测试非正式] 表头"""
+        output_dir = self.test_work / "output_mock_tag"
+        reporter = LabReporter("lab1", output_dir)
+        s1 = self.roster_mgr.students[0]
+
+        g = StudentGrade(student=s1, total_score=5.0, status="graded", comment="学生甲模拟全对" + "。" * 40)
+        rep_paths = reporter.generate_all_reports(
+            self.roster_mgr.students,
+            {s1.student_id: g},
+            excel_template_path=DEFAULT_TEMPLATE_PATH if DEFAULT_TEMPLATE_PATH.exists() else None,
+            mock_mode=True,
+        )
+
+        # 检查文件名含有 mock_
+        self.assertTrue("mock_" in rep_paths["roster_csv"].name)
+        self.assertTrue("mock_" in rep_paths["detail_csv"].name)
+
+        csv_text = rep_paths["roster_csv"].read_text(encoding="utf-8-sig")
+        # 检查表头明确标识模拟
+        self.assertIn("分数(5)[模拟测试非正式]", csv_text)
+        # 检查分数单元格包含 [模拟] 5.00
+        self.assertIn("[模拟] 5.00", csv_text)
+
+        if "roster_xlsx" in rep_paths:
+            import openpyxl
+            wb = openpyxl.load_workbook(rep_paths["roster_xlsx"])
+            ws = wb["Lab 1"]
+            self.assertEqual(ws.cell(row=2, column=4).value, "分数(5)[模拟测试非正式]")
+            self.assertIn("[模拟]", str(ws.cell(row=3, column=4).value))
+
+    def test_21_ai_student_identity_mismatch_flagged(self):
+        """测试 21: AI 返回其他学生身份时系统准确识别矛盾、扣除得分并标记待复核"""
+        s1 = self.roster_mgr.students[0]
+        from checker.ai import HandwrittenReviewer
+
+        dummy_img = self.test_work / "dummy.png"
+        dummy_img.write_bytes(b"dummy_png_bytes_content" * 20)
+
+        mock_wrong_student = {
+            "task_id": "lab1_2_handwritten",
+            "student_id_observed": "2026999999",  # 另一位学生学号
+            "name_observed": "张三丰",          # 另一位学生姓名
+            "phone_observed": "88",
+            "x_observed": 67,
+            "y_observed": 88,
+            "info_score": 0.5,
+            "xy_match_score": 0.2,
+            "derivation_score": 0.8,
+            "suggested_score": 1.5,
+            "is_pending": False,
+            "reasoning": "书写规范",
+            "needs_review": False,
+        }
+
+        from unittest.mock import patch
+        with patch("checker.ai.call_agy_cli", return_value=(True, mock_wrong_student, "OK")):
+            res = HandwrittenReviewer.review_images(
+                student_id=s1.student_id,
+                student_name=s1.name,
+                expected_x=67,
+                image_paths=[dummy_img],
+                mock_mode=False,
+            )
+            # 必须判定身份矛盾并标记复核，得分清零
+            self.assertTrue(res["needs_review"])
+            self.assertEqual(res["suggested_score"], 0.0)
+            self.assertIn("演草纸学生身份矛盾", res["review_reason"])
+
+    def test_22_ai_regex_fallback_parsing(self):
+        """测试 22: call_agy_cli 在无 structured_output 时使用正则回退解析不产生 NameError"""
+        from checker.ai import call_agy_cli
+        from unittest.mock import patch, MagicMock
+
+        # 模拟 CLI 仅返回 Markdown 围栏代码块中的 JSON，无 structured_output
+        cli_raw_stdout = """
+Here is the review result:
+```json
+{
+  "task_id": "lab1_2_handwritten",
+  "student_id_observed": "2026000067",
+  "name_observed": "测试生",
+  "phone_observed": "88",
+  "x_observed": 67,
+  "y_observed": 88,
+  "info_score": 0.5,
+  "xy_match_score": 0.2,
+  "derivation_score": 0.8,
+  "suggested_score": 1.5,
+  "reasoning": "测试通过",
+  "needs_review": false,
+  "review_reason": ""
+}
+```
+"""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = json.dumps({"response": cli_raw_stdout})
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            ok, res, msg = call_agy_cli("dummy prompt", {})
+            self.assertTrue(ok)
+            self.assertIsNotNone(res)
+            self.assertEqual(res.get("task_id"), "lab1_2_handwritten")
+            self.assertEqual(res.get("x_observed"), 67)
 
 
 if __name__ == "__main__":
