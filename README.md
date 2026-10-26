@@ -1,1 +1,116 @@
-# labchecker
+# LabChecker - C/C++ 实验批量自动化判题机
+
+对标高校大一《程序设计思维与实践》课程（基于 Code::Blocks 25.03 / WinLibs GCC 14.2.0 环境体系），运行于 Ubuntu / Linux 环境下的高鲁棒性、多模态自动化判题系统。
+
+---
+
+## 1. 核心架构与目录组织
+
+项目遵循规范化的目录分层结构，所有中间临时输出与沙箱工作区统一汇聚于 `.work/`：
+
+```text
+/home/user/Projects/labchecker/
+├── .gitignore                      # 忽略 .work/, build/, 参考文件/ 等
+├── .work/                          # 【强制规范】所有临时解压缓存、中间编译与沙箱执行工作区
+├── AGENTS.md                       # Agent 协同契约与核心开发/评测规范
+├── README.md                       # 本说明文档
+├── 参考文件/                       # 原始实验指导书、点名册、成绩模板（只读归档）
+├── checker/                        # 公共判题机核心引擎
+│   ├── __init__.py
+│   ├── config.py                   # 全局配置、路径、编译器参数、超时与资源限制
+│   ├── models.py                   # 核心数据模型 (Student, ProblemResult, StudentGrade 等)
+│   ├── roster.py                   # 点名册解析与学生身份模糊匹配引擎 (.xls / .xlsx)
+│   ├── unpack.py                   # 安全解压防 Zip Slip、编码转换 (CP936/UTF-8)、题目归属
+│   ├── compiler.py                 # GCC/G++ 编译引擎与 Windows 兼容性自动转译
+│   ├── sandbox.py                  # 隔离运行沙箱、进程组超时强杀、内存与刷屏截断
+│   ├── ai.py                       # AI4study：手写演算视觉批改与语义歧义复核 (对接 agy CLI)
+│   ├── reporter.py                 # 生成三份交付报表 (结果明细表、批次报告、成绩单)
+│   ├── cli.py                      # 统一命令行接口
+│   └── labs/                       # 实验评测规则集
+│       ├── base.py                 # 评测基类与接口契约
+│       ├── lab1.py                 # Lab 1 (进制与位运算 + 温度转换)
+│       └── lab2.py                 # Lab 2 (热身 + 时间问候 + 字母金字塔 + 选做题)
+├── tests/                          # 完整单元与集成测试套件
+│   └── test_checker.py
+├── lab1/                           # Lab 1 实验评测空间
+│   ├── main.py                     # Lab 1 独立启动入口
+│   ├── submit/                     # 原始提交包 (只读归档，支持 .zip、散放文件、子目录)
+│   ├── src/                        # 规格化后的学生源码及附件 (<学号>/)
+│   ├── build/                      # 编译产物、兼容处理副本 (_compat) 及诊断日志 (<学号>/)
+│   └── output/                     # 评测产物输出
+│       ├── lab1结果.csv             # 逐人逐题评测依据与测试明细
+│       ├── lab1报告.md             # 批次总结统计与待人工复核清单
+│       ├── lab1实验成绩单.csv       # 完整点名册成绩与 >=50字定制评语
+│       └── lab1实验成绩单.xlsx     # 自动回填的官方格式 Excel 成绩单
+└── lab2/                           # Lab 2 实验评测空间 (结构同 lab1/)
+    ├── main.py
+    ├── submit/
+    ├── src/
+    ├── build/
+    └── output/
+```
+
+---
+
+## 2. 快速使用指南
+
+### 依赖环境
+- **操作系统**: Linux / Ubuntu 22.04+
+- **编译器**: `gcc` / `g++` (支持 C11/C17 与 C++17)
+- **Python**: Python 3.10+，依赖 `xlrd` 与 `openpyxl`（处理点名册与成绩单表格）
+- **AI 支撑**: Antigravity CLI (`/home/user/.local/bin/agy`)
+
+### 命令行运行
+
+```bash
+# 执行 Lab 1 批量判题 (真实 AI 模式)
+python3 -m checker --lab lab1
+
+# 执行 Lab 2 批量判题 (使用 Mock AI 离线快速评测)
+python3 -m checker --lab lab2 --mock-ai
+
+# 同时执行 Lab 1 与 Lab 2
+python3 -m checker --lab all --mock-ai
+
+# 仅评测指定学号的学生提交
+python3 -m checker --lab lab1 --student-id 2026110067
+
+# 运行全套单元与集成测试
+python3 -m unittest -v tests/test_checker.py
+```
+
+---
+
+## 3. 核心设计与防坑机制
+
+### 3.1 临时目录规范 (`.work`)
+所有判题过程中的解压中间文件、临时单测数据、运行时工作目录均限制在 `.work/` 下，已写入 `.gitignore` 并受 `AGENTS.md` 约束，保持提交目录与源码目录的纯净与只读追溯性。
+
+### 3.2 严密防范 Zip Slip 路径越界
+解压过程通过 `os.path.commonpath` 严格校验目标路径，杜绝学生提交包中包含 `../../` 路径穿越、软链接逃逸或恶意解压炸弹。
+
+### 3.3 Windows 兼容性平滑转译
+学生在 Windows Code::Blocks / VS 下提交的代码经常包含环境专有依赖：
+- `#include <windows.h>`、`<conio.h>`、`stdafx.h`
+- `system("pause")`、`fflush(stdin)`
+- `scanf_s(...)`
+- GBK / CP936 中文编码与 BOM 头
+
+判题机先尝试原生编译；失败时在 `labX/build/<学号>/` 生成 `_compat` 副本进行中立转译，**严格杜绝篡改算法逻辑、补齐缺失分支或改变数学公式**，并将修改详情记录在编译日志与结果表中。
+
+### 3.4 宽松判题与语义识别
+- **数字提取与容错**：温度转换（Lab 1-3）允许合理浮点舍入误差（$\pm 0.08$），容忍中英文友好交互提示词（如 `请输入温度:`）。
+- **整型截断除法识别**：精准捕捉学生常犯的 `5/9` 整型除法先被截断为 0 的逻辑缺陷。
+- **指导书笔误兼容**：针对 Lab 2-2 字母金字塔第 3 行示例笔误 `___ABCBC`，系统既认可标准对称序列 `ABCBA`，也对复制了指导书笔误的学生予以宽容通过并标记。
+- **选做题与热身**：Lab 2 热身练习（0分）与选做题（Lab 2-3 回文素数、Lab 2-4 编码器）独立建档，不影响 5 分必做满分基准。
+
+### 3.5 隔离沙箱与超时强杀
+运行通过独立进程组 (`os.setsid`) 与 `rlimit` 限额隔离；发生死循环时在 2.0 秒内向整组发送 `SIGKILL` 强制回收；捕获输出自动截断（上限 64KB），防止死循环刷屏引发 OOM。
+
+### 3.6 AI4study 多模态批改与复核
+- 对接 `/home/user/.local/bin/agy` CLI，通过 `--json-schema` 强制约束结构化输出。
+- **演草纸视觉批改 (Lab 1-2)**：核验姓名、学号、手机号及 6 种操作符（`!`、`||`、`&&`、`~`、`|`、`&`）的二进制列竖式推导。
+- **AI 异常保底**：AI 超时或调度失败**严禁自动判 0 分**，系统自动置为 `needs_review = true` 并保留待人工复核标记。
+
+### 3.7 全量花名册对齐与定制评语
+点名册（92名学生）全量对齐，未交卷学生明确标识；针对每位学生的不同代码、编译与测试执行事实，动态生成**不少于 50 字**的定制评语，直接生成标准 CSV 并自动回填官方 Excel 成绩单。
