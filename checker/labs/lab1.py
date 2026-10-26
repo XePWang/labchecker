@@ -84,8 +84,10 @@ class Lab1Judge(BaseLabJudge):
 
         if any(r.is_pending for r in grade.problem_results.values()):
             grade.is_pending = True
-
-        if not files:
+            grade.needs_review = True
+            grade.status = "needs_review"
+            grade.total_score = 0.0
+        elif not files:
             grade.status = "missing"
             grade.total_score = 0.0
         elif res1_2.status == "compile_error" and res1_3.status == "compile_error":
@@ -240,6 +242,19 @@ class Lab1Judge(BaseLabJudge):
             prob.is_pending = True
             prob.needs_review = True
 
+        # 演草纸学生身份核对（学号与姓名）
+        hw_sid = ai_res.get("student_id_observed")
+        hw_name = ai_res.get("name_observed")
+        if hw_sid and str(hw_sid).strip() != str(student.student_id).strip():
+            prob.needs_review = True
+            prob.review_reasons.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
+            handwritten_score = 0.0
+
+        if hw_name and str(hw_name).strip() != str(student.name).strip():
+            prob.needs_review = True
+            prob.review_reasons.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
+            handwritten_score = min(handwritten_score, 0.8)
+
         # 参数一致性交叉核对（代码、手机号、演草纸）
         hw_x = ai_res.get("x_observed")
         hw_y = ai_res.get("y_observed")
@@ -354,11 +369,17 @@ class Lab1Judge(BaseLabJudge):
                 # 提取输出中所有浮点数
                 floats = [float(fl) for fl in re.findall(r"-?\b\d+(?:\.\d+)?\b", exec_res.stdout)]
 
-                # 防作弊检测 1: 程序同时倾倒多个用例的标准参考答案
-                other_targets = [v for _, _, v in self.lab1_3_cases if abs(v - expected_val) > 0.1]
-                matches_other_targets = sum(1 for ot in other_targets if any(abs(f - ot) <= 0.08 for f in floats))
-                if matches_other_targets >= 2 or len(floats) >= 6:
-                    case_res.error_message = "检测到程序同时输出多个无关参考答案，判定作弊刷屏"
+                # 防作弊检测: 程序同时倾倒多个用例的标准参考答案
+                # 排除 0.0 与 32.0 等公式与输入常见整数常数，仅关注特异性温度浮点答案（如 37.78, 19.99, -17.78, 212.00, 29.72, 77.00）
+                other_specific_targets = [
+                    v for _, _, v in self.lab1_3_cases
+                    if abs(v - expected_val) > 0.1 and abs(v) > 0.1 and abs(v - 32.0) > 0.1
+                ]
+                matches_other_targets = sum(
+                    1 for ot in other_specific_targets if any(abs(f - ot) <= 0.05 for f in floats)
+                )
+                if matches_other_targets >= 2:
+                    case_res.error_message = "检测到程序同时输出多个无关特定参考答案，判定作弊刷屏"
                     prob.test_results.append(case_res)
                     continue
 
@@ -377,7 +398,7 @@ class Lab1Judge(BaseLabJudge):
                     case_res.score = case_res.max_score
                     passed_cases += 1
                 else:
-                    if not mock_ai and idx == 1:
+                    if idx == 1:
                         ai_sem = SemanticAmbiguityReviewer.review_output(
                             problem_id="1-3",
                             student_id=student.student_id,
@@ -393,10 +414,20 @@ class Lab1Judge(BaseLabJudge):
                             case_res.score = case_res.max_score
                             passed_cases += 1
                             prob.notes.append(f"用例 {idx} 经 AI 语义复核确认逻辑正确通过")
+                        elif ai_sem.get("is_pending"):
+                            case_res.needs_review = True
+                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核超时或异常，成绩待定"
+                            case_res.review_reason = sem_reason
+                            prob.is_pending = True
+                            prob.needs_review = True
+                            prob.review_reasons.append(f"1-3 语义复核待定: {sem_reason}")
+                            prob.notes.append(f"用例 {idx} AI 语义复核待定: {sem_reason}")
                         elif ai_sem.get("needs_review"):
                             case_res.needs_review = True
-                            case_res.review_reason = ai_sem.get("review_reason", "")
+                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核需人工介入"
+                            case_res.review_reason = sem_reason
                             prob.needs_review = True
+                            prob.review_reasons.append(f"1-3 需人工复核: {sem_reason}")
 
             prob.test_results.append(case_res)
 
@@ -416,7 +447,10 @@ class Lab1Judge(BaseLabJudge):
 
         # 计分
         prob.score = round(2.0 * (passed_cases / total_cases), 2)
-        if passed_cases == total_cases:
+        if prob.is_pending:
+            prob.status = "needs_review"
+            prob.score = 0.0
+        elif passed_cases == total_cases:
             prob.status = "passed"
         elif passed_cases > 0:
             prob.status = "partial"

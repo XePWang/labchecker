@@ -103,8 +103,10 @@ class Lab2Judge(BaseLabJudge):
 
         if any(r.is_pending for r in grade.problem_results.values()):
             grade.is_pending = True
-
-        if not files:
+            grade.needs_review = True
+            grade.status = "needs_review"
+            grade.total_score = 0.0
+        elif not files:
             grade.status = "missing"
             grade.total_score = 0.0
         elif res2_1.status == "compile_error" and res2_2.status == "compile_error":
@@ -188,7 +190,7 @@ class Lab2Judge(BaseLabJudge):
                     passed_cases += 1
                 else:
                     # 确定性未命中，调用语义复核
-                    if not mock_ai and idx == 1:
+                    if idx == 1:
                         ai_sem = SemanticAmbiguityReviewer.review_output(
                             problem_id="2-1",
                             student_id=student.student_id,
@@ -204,11 +206,28 @@ class Lab2Judge(BaseLabJudge):
                             case_res.score = case_res.max_score
                             passed_cases += 1
                             prob.notes.append(f"用例 {idx} 经 AI 语义复核确认问候语正确")
+                        elif ai_sem.get("is_pending"):
+                            case_res.needs_review = True
+                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核超时或异常，判定待定"
+                            case_res.review_reason = sem_reason
+                            prob.is_pending = True
+                            prob.needs_review = True
+                            prob.review_reasons.append(f"2-1 语义复核待定: {sem_reason}")
+                            prob.notes.append(f"用例 {idx} AI 语义复核待定: {sem_reason}")
+                        elif ai_sem.get("needs_review"):
+                            case_res.needs_review = True
+                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核需人工介入"
+                            case_res.review_reason = sem_reason
+                            prob.needs_review = True
+                            prob.review_reasons.append(f"2-1 需人工复核: {sem_reason}")
 
             prob.test_results.append(case_res)
 
         prob.score = round(2.0 * (passed_cases / total_cases), 2)
-        if passed_cases == total_cases:
+        if prob.is_pending:
+            prob.status = "needs_review"
+            prob.score = 0.0
+        elif passed_cases == total_cases:
             prob.status = "passed"
         elif passed_cases > 0:
             prob.status = "partial"
