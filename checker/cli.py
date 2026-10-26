@@ -94,9 +94,26 @@ def run_lab(
 
     print(f"[*] 开始自动化评测 (共 {len(students_to_grade)} 人, Mock AI: {mock_ai})...")
     for idx, student in enumerate(students_to_grade, 1):
-        files = student_files_map.get(student.student_id, [])
-        grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai)
-        grades[student.student_id] = grade
+        if student.student_id in normalizer.conflict_students:
+            conflict_reason = normalizer.conflict_students[student.student_id]
+            grade = StudentGrade(
+                student=student,
+                max_score=5.0,
+                total_score=0.0,
+                status="ambiguous",
+                needs_review=True,
+                is_pending=True,
+                review_reasons=[f"归属冲突: {conflict_reason}"],
+                comment=(
+                    f"{student.name}同学你好！系统检测到提交文件中存在多学号匹配冲突（{conflict_reason}），"
+                    f"无法自动确定作业归属。该情况已转入助教人工复核清单，成绩暂时待定，请主动联系助教澄清。"
+                ),
+            )
+            grades[student.student_id] = grade
+        else:
+            files = student_files_map.get(student.student_id, [])
+            grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai)
+            grades[student.student_id] = grade
 
         status_flag = "✓" if grade.status == "graded" else ("!" if grade.needs_review else "✗")
         review_flag = " [需复核]" if grade.needs_review else ""
@@ -108,18 +125,49 @@ def run_lab(
     # 5. 导出报表
     print(f"[*] 正在导出判题报表与成绩单至 {output_dir}...")
     reporter = LabReporter(lab_name, output_dir)
-    report_paths = reporter.generate_all_reports(
-        roster_students=roster_mgr.students,
-        grades=grades,
-        excel_template_path=template_path if template_path.exists() else None,
-    )
 
-    print(f"[+] 报表生成完毕:")
-    print(f"  - 详细评测记录: {report_paths['detail_csv']}")
-    print(f"  - 批次总结报告: {report_paths['summary_md']}")
-    print(f"  - 花名册成绩单: {report_paths['roster_csv']}")
-    if "roster_xlsx" in report_paths:
-        print(f"  - 官方模板Excel: {report_paths['roster_xlsx']}")
+    if single_student_id:
+        # 单人重判模式：生成独立单人报表，并在历史全班成绩存在时安全合并更新，严防全班 0 分覆盖
+        target_student = students_to_grade[0]
+        target_grade = grades[target_student.student_id]
+        single_paths = reporter.generate_single_student_report(target_student, target_grade)
+        print(f"[+] 单人独立报表生成完毕:")
+        print(f"  - 单人详细记录: {single_paths['detail_csv']}")
+        print(f"  - 单人总结报告: {single_paths['summary_md']}")
+
+        detail_batch = output_dir / f"{lab_name}结果.csv"
+        if detail_batch.exists():
+            print(f"[*] 检测到历史批次成绩文件，正在安全合并单人结果并更新全班成绩单...")
+            merged_grades = reporter.load_existing_grades_from_files(roster_mgr.students)
+            merged_grades[target_student.student_id] = target_grade
+            report_paths = reporter.generate_all_reports(
+                roster_students=roster_mgr.students,
+                grades=merged_grades,
+                ambiguous_items=normalizer.ambiguous_items,
+                unmatched_items=normalizer.unmatched_items,
+                excel_template_path=template_path if template_path.exists() else None,
+                mock_mode=mock_ai,
+            )
+            print(f"[+] 全班报表合并更新完毕: {report_paths['roster_csv']}")
+        else:
+            print(f"[*] 全班历史批次成绩文件不存在，仅保留单人独立报表，未覆盖全班花名册。")
+    else:
+        # 全量批次模式
+        report_paths = reporter.generate_all_reports(
+            roster_students=roster_mgr.students,
+            grades=grades,
+            ambiguous_items=normalizer.ambiguous_items,
+            unmatched_items=normalizer.unmatched_items,
+            excel_template_path=template_path if template_path.exists() else None,
+            mock_mode=mock_ai,
+        )
+
+        print(f"[+] 报表生成完毕:")
+        print(f"  - 详细评测记录: {report_paths['detail_csv']}")
+        print(f"  - 批次总结报告: {report_paths['summary_md']}")
+        print(f"  - 花名册成绩单: {report_paths['roster_csv']}")
+        if "roster_xlsx" in report_paths:
+            print(f"  - 官方模板Excel: {report_paths['roster_xlsx']}")
 
     print(f"==========================================")
     print(f"🎉 {lab_name.upper()} 评测完成！\n")
