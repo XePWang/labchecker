@@ -1,0 +1,170 @@
+"""
+checker.cli
+判题系统命令行交互入口
+"""
+import argparse
+import sys
+from pathlib import Path
+from typing import Dict
+
+from checker.config import DEFAULT_ROSTER_PATH, DEFAULT_TEMPLATE_PATH, PROJECT_ROOT, WORK_DIR
+from checker.labs.lab1 import Lab1Judge
+from checker.labs.lab2 import Lab2Judge
+from checker.models import StudentGrade
+from checker.reporter import LabReporter
+from checker.roster import RosterManager
+from checker.unpack import SubmissionNormalizer
+
+
+def run_lab(
+    lab_id: str,
+    roster_path: Path,
+    template_path: Path,
+    mock_ai: bool = False,
+    single_student_id: str = "",
+) -> int:
+    """运行指定实验的完整判题流水线"""
+    lab_name = lab_id.lower()
+    lab_root = PROJECT_ROOT / lab_name
+
+    print(f"\n==========================================")
+    print(f"🚀 开始执行《程序设计思维与实践》{lab_name.upper()} 批量判题流水线")
+    print(f"==========================================")
+
+    # 1. 加载花名册
+    print(f"[*] 正在加载点名册: {roster_path}...")
+    roster_mgr = RosterManager(roster_path)
+    total_students = len(roster_mgr.students)
+    print(f"[+] 成功加载点名册学生: {total_students} 人")
+
+    # 2. 识别、解压并规范化提交文件
+    submit_dir = lab_root / "submit"
+    src_dir = lab_root / "src"
+    build_dir = lab_root / "build"
+    output_dir = lab_root / "output"
+
+    submit_dir.mkdir(parents=True, exist_ok=True)
+    src_dir.mkdir(parents=True, exist_ok=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[*] 正在从 {submit_dir} 识别并规范化学生提交...")
+    normalizer = SubmissionNormalizer(roster_mgr, lab_name, lab_root)
+    student_files_map = normalizer.process_all_submissions()
+    print(f"[+] 规范化完成，已归属学生数: {len(student_files_map)}")
+
+    if normalizer.unmatched_items:
+        print(f"[!] 警告: 发现 {len(normalizer.unmatched_items)} 个未匹配提交项，将记录在审计清单")
+    if normalizer.ambiguous_items:
+        print(f"[!] 警告: 发现 {len(normalizer.ambiguous_items)} 个多候选冲突项，将标记人工复核")
+
+    # 3. 实例化对应实验评测器
+    if lab_name == "lab1":
+        judge = Lab1Judge()
+    elif lab_name == "lab2":
+        judge = Lab2Judge()
+    else:
+        print(f"[-] 错误: 暂未实现该实验的评测规则 ({lab_name})")
+        return 1
+
+    # 4. 执行逐人评测
+    grades: Dict[str, StudentGrade] = {}
+    students_to_grade = roster_mgr.students
+    if single_student_id:
+        target = roster_mgr.find_student_by_id(single_student_id)
+        if not target:
+            print(f"[-] 错误: 点名册中未找到学号为 {single_student_id} 的学生")
+            return 1
+        students_to_grade = [target]
+
+    print(f"[*] 开始自动化评测 (共 {len(students_to_grade)} 人, Mock AI: {mock_ai})...")
+    for idx, student in enumerate(students_to_grade, 1):
+        files = student_files_map.get(student.student_id, [])
+        grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai)
+        grades[student.student_id] = grade
+
+        status_flag = "✓" if grade.status == "graded" else ("!" if grade.needs_review else "✗")
+        review_flag = " [需复核]" if grade.needs_review else ""
+        print(
+            f"  [{idx:2d}/{len(students_to_grade):2d}] {status_flag} {student.student_id} {student.name:6s} "
+            f"总分: {grade.total_score:4.2f}/5.00 ({grade.status}){review_flag}"
+        )
+
+    # 5. 导出报表
+    print(f"[*] 正在导出判题报表与成绩单至 {output_dir}...")
+    reporter = LabReporter(lab_name, output_dir)
+    report_paths = reporter.generate_all_reports(
+        roster_students=roster_mgr.students,
+        grades=grades,
+        excel_template_path=template_path if template_path.exists() else None,
+    )
+
+    print(f"[+] 报表生成完毕:")
+    print(f"  - 详细评测记录: {report_paths['detail_csv']}")
+    print(f"  - 批次总结报告: {report_paths['summary_md']}")
+    print(f"  - 花名册成绩单: {report_paths['roster_csv']}")
+    if "roster_xlsx" in report_paths:
+        print(f"  - 官方模板Excel: {report_paths['roster_xlsx']}")
+
+    print(f"==========================================")
+    print(f"🎉 {lab_name.upper()} 评测完成！\n")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="《程序设计思维与实践》批量自动化判题机")
+    parser.add_argument(
+        "--lab",
+        type=str,
+        default="lab1",
+        choices=["lab1", "lab2", "all"],
+        help="待评测的实验编号 (lab1, lab2, 或 all)",
+    )
+    parser.add_argument(
+        "--roster",
+        type=Path,
+        default=DEFAULT_ROSTER_PATH,
+        help="点名册文件路径 (.xls 或 .xlsx)",
+    )
+    parser.add_argument(
+        "--template",
+        type=Path,
+        default=DEFAULT_TEMPLATE_PATH,
+        help="成绩单模板路径 (.xlsx)",
+    )
+    parser.add_argument(
+        "--mock-ai",
+        action="store_true",
+        help="使用 Mock 模式模拟 AI4study 多模态批改与语义复核（适合离线快速测试）",
+    )
+    parser.add_argument(
+        "--student-id",
+        type=str,
+        default="",
+        help="仅针对单个学号执行判题",
+    )
+
+    args = parser.parse_args()
+
+    if args.lab == "all":
+        labs = ["lab1", "lab2"]
+    else:
+        labs = [args.lab]
+
+    exit_code = 0
+    for l_id in labs:
+        ret = run_lab(
+            lab_id=l_id,
+            roster_path=args.roster,
+            template_path=args.template,
+            mock_ai=args.mock_ai,
+            single_student_id=args.student_id,
+        )
+        if ret != 0:
+            exit_code = ret
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
