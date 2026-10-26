@@ -35,4 +35,5 @@ MAX_MEMORY_MB = 128  # 虚拟内存上限 (MB)
 
 # Antigravity CLI 配置
 AGY_CLI_PATH = shutil.which("agy") or "/home/user/.local/bin/agy"
+AGY_MODEL = os.environ.get("AGY_MODEL", "gemini-3.8-flash-low")
 AGY_TIMEOUT_SECONDS = 90  # AI 推理与多模态解析超时时间

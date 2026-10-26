@@ -9,12 +9,110 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from checker.config import C_STANDARD, CXX_STANDARD, COMMON_CFLAGS, GCC_PATH, GXX_PATH
+from checker.config import C_STANDARD, CXX_STANDARD, GCC_PATH, GXX_PATH
 from checker.models import CompileResult
 
+# 编译器通用参数与链接选项 (确保 -lm 放置于末尾以满足 GCC 链接符号解析规则)
+COMPILER_FLAGS = ["-O2", "-Wall"]
+LINKER_FLAGS = ["-lm"]
 
 # Windows 特有头文件与替换方案
 WINDOWS_HEADERS = ["windows.h", "conio.h", "tchar.h", "stdafx.h", "io.h"]
+
+SCANF_S_SHIM = r"""/* [COMPAT SHIM] MSVC scanf_s implementation for GCC/Linux */
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int _labchecker_scanf_s(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char line[1024];
+    if (!fgets(line, sizeof(line), stdin)) {
+        va_end(ap);
+        return EOF;
+    }
+    const char *p = fmt;
+    const char *inp = line;
+    int matched = 0;
+    while (*p && *inp) {
+        if (*p == ' ' || *p == '\t' || *p == '\n') {
+            while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
+            p++;
+            continue;
+        }
+        if (*p == '%') {
+            p++;
+            int is_suppress = 0;
+            if (*p == '*') { is_suppress = 1; p++; }
+            char mod[4] = {0};
+            int m_idx = 0;
+            while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'z') {
+                if (m_idx < 3) mod[m_idx++] = *p;
+                p++;
+            }
+            char spec = *p++;
+            if (spec == 'c') {
+                void *ptr = is_suppress ? NULL : va_arg(ap, void*);
+                unsigned sz = is_suppress ? 0 : va_arg(ap, unsigned);
+                (void)sz;
+                if (ptr && *inp) {
+                    *(char*)ptr = *inp++;
+                    matched++;
+                }
+            } else if (spec == 's') {
+                char *ptr = is_suppress ? NULL : va_arg(ap, char*);
+                unsigned sz = is_suppress ? 0 : va_arg(ap, unsigned);
+                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
+                int cnt = 0;
+                while (*inp && *inp != ' ' && *inp != '\t' && *inp != '\n' && (sz == 0 || cnt + 1 < (int)sz)) {
+                    if (ptr) ptr[cnt] = *inp;
+                    cnt++;
+                    inp++;
+                }
+                if (ptr && cnt > 0) {
+                    ptr[cnt] = '\0';
+                    matched++;
+                }
+            } else if (spec == 'd' || spec == 'i') {
+                void *ptr = is_suppress ? NULL : va_arg(ap, void*);
+                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
+                char *endp;
+                long val = strtol(inp, &endp, (spec == 'i' ? 0 : 10));
+                if (endp > inp) {
+                    if (ptr) {
+                        if (strcmp(mod, "hd") == 0 || strcmp(mod, "h") == 0) *(short*)ptr = (short)val;
+                        else if (strcmp(mod, "ld") == 0 || strcmp(mod, "l") == 0) *(long*)ptr = val;
+                        else *(int*)ptr = (int)val;
+                    }
+                    inp = endp;
+                    matched++;
+                }
+            } else if (spec == 'f' || spec == 'g' || spec == 'e') {
+                void *ptr = is_suppress ? NULL : va_arg(ap, void*);
+                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
+                char *endp;
+                double val = strtod(inp, &endp);
+                if (endp > inp) {
+                    if (ptr) {
+                        if (strcmp(mod, "l") == 0 || strcmp(mod, "lf") == 0) *(double*)ptr = val;
+                        else *(float*)ptr = (float)val;
+                    }
+                    inp = endp;
+                    matched++;
+                }
+            }
+        } else {
+            if (*inp == *p) { inp++; p++; }
+            else break;
+        }
+    }
+    va_end(ap);
+    return matched;
+}
+#define scanf_s _labchecker_scanf_s
+"""
 
 
 def detect_and_convert_encoding(raw_bytes: bytes) -> Tuple[str, str]:
@@ -38,7 +136,7 @@ def generate_compat_source(source_text: str) -> Tuple[str, List[str]]:
     new_lines = []
 
     has_conio = False
-    has_windows = False
+    has_scanf_s = False
 
     for line in lines:
         stripped = line.strip()
@@ -53,8 +151,6 @@ def generate_compat_source(source_text: str) -> Tuple[str, List[str]]:
                 matched_win_header = True
                 if "conio" in wh.lower():
                     has_conio = True
-                if "windows" in wh.lower():
-                    has_windows = True
                 break
 
         if matched_win_header:
@@ -69,45 +165,44 @@ def generate_compat_source(source_text: str) -> Tuple[str, List[str]]:
                 flags=re.IGNORECASE,
             )
             new_lines.append(sub_line)
-            reasons.append("替换 Windows 控制台挂起 system(\"pause\")")
+            reasons.append('替换 Windows 控制台挂起 system("pause")')
             continue
 
         # 3. 替换 getch() / _getch()
         if re.search(r'\b_?getch\s*\(\s*\)', line):
             sub_line = re.sub(r'\b_?getch\s*\(\s*\)', 'getchar()', line)
             new_lines.append(sub_line)
-            reasons.append("替换 conio.h 中的 getch() 为标准 getchar()")
+            reasons.append('替换 conio.h 中的 getch() 为标准 getchar()')
             continue
 
-        # 4. 替换 scanf_s 为 scanf
+        # 4. 检测 scanf_s (使用专用 shim 替代简单字符串替换)
         if re.search(r'\bscanf_s\b', line):
-            # 将常见的基础数据类型 scanf_s 简化为 scanf (对于 %d, %f, %lf 等完全等价)
-            sub_line = re.sub(r'\bscanf_s\b', 'scanf', line)
-            new_lines.append(sub_line)
-            reasons.append("将 MSVC 安全扩展 scanf_s 转译为标准 scanf")
+            has_scanf_s = True
+            # 保留原代码中的 scanf_s 调用，由前置 shim 处理
+            new_lines.append(line)
             continue
 
         # 5. 替换 fflush(stdin) 这一非标准未定义行为
         if re.search(r'fflush\s*\(\s*stdin\s*\)', line):
             sub_line = re.sub(r'fflush\s*\(\s*stdin\s*\)', '/* fflush(stdin) */', line)
             new_lines.append(sub_line)
-            reasons.append("注释掉 MSVC 未定义行为 fflush(stdin)")
+            reasons.append('注释掉 MSVC 未定义行为 fflush(stdin)')
             continue
 
         new_lines.append(line)
 
-    compat_code = "\n".join(new_lines)
-
-    # 如果原代码依赖 conio.h 但使用了一些宏定义，可在开头插入兼容存根
     header_stubs = []
     if has_conio:
         header_stubs.append("/* Compat stubs for conio */\n#include <stdio.h>\n")
+    if has_scanf_s:
+        header_stubs.append(SCANF_S_SHIM + "\n")
+        reasons.append('注入 MSVC 兼容的 scanf_s 存根函数 (安全处理 %s/%c 缓冲区尺寸参数)')
 
-    return "\n".join(header_stubs) + compat_code, reasons
+    return "\n".join(header_stubs) + "\n".join(new_lines), reasons
 
 
 class ProjectCompiler:
-    """负责将学生源码编译为可执行文件，并提供自动兼容重试机制"""
+    """负责将学生源码编译为可执行文件，并提供自动兼容重试机制与网络隔离"""
 
     def __init__(self):
         self.gcc = GCC_PATH
@@ -119,12 +214,13 @@ class ProjectCompiler:
         build_dir: Path,
         problem_id: str,
         extra_sources: Optional[List[Path]] = None,
+        include_dirs: Optional[List[Path]] = None,
     ) -> CompileResult:
         """
         编译单个题目代码
-        1. 首先尝试直接编译原始文件
-        2. 若因 Windows 头文件/语法失败，生成 compat 副本并重试
-        3. 记录完整的命令、耗时、标准输出与错误
+        1. 确保 -lm 位于链接库末尾
+        2. 保留相对目录结构与 include 路径
+        3. 若因 Windows 专有库失败，生成 _compat 副本
         """
         build_dir.mkdir(parents=True, exist_ok=True)
         is_cpp = src_path.suffix.lower() in {".cpp", ".cc", ".cxx"}
@@ -135,12 +231,27 @@ class ProjectCompiler:
         bin_path = build_dir / bin_name
         log_path = build_dir / f"{problem_id}_compile.log"
 
+        inc_args = []
+        if include_dirs:
+            for inc in include_dirs:
+                inc_args.extend(["-I", str(inc.resolve())])
+        inc_args.extend(["-I", str(src_path.parent.resolve())])
+
         sources = [src_path] + (extra_sources or [])
-        cmd = [compiler, std_flag] + COMMON_CFLAGS + [str(s) for s in sources] + ["-o", str(bin_path)]
+        # 链接库 LINKER_FLAGS (如 -lm) 必须放在 sources 之后
+        cmd = [compiler, std_flag] + COMPILER_FLAGS + inc_args + [str(s.resolve()) for s in sources] + ["-o", str(bin_path)] + LINKER_FLAGS
+
+        # 使用 unshare --user -n 隔离编译过程中的外部网络访问
+        wrapped_cmd = cmd
+        try:
+            if shutil.which("unshare"):
+                wrapped_cmd = ["unshare", "--user", "-n"] + cmd
+        except Exception:
+            pass
 
         start_time = time.time()
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            res = subprocess.run(wrapped_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
             duration_ms = (time.time() - start_time) * 1000
 
             if res.returncode == 0 and bin_path.exists():
@@ -157,16 +268,16 @@ class ProjectCompiler:
                 )
         except subprocess.TimeoutExpired:
             duration_ms = (time.time() - start_time) * 1000
-            self._write_log(log_path, cmd, "", "编译进程超时 (30s)", -1, duration_ms, False, [])
+            self._write_log(log_path, cmd, "", "编译进程超时 (20s)", -1, duration_ms, False, [])
             return CompileResult(
                 success=False,
                 command=cmd,
-                stderr="编译超时 (30s)",
+                stderr="编译超时 (20s)",
                 exit_code=-1,
                 duration_ms=duration_ms,
             )
 
-        # 编译失败，分析错误信息是否属于 Windows 兼容性问题
+        # 编译失败，分析是否属于 Windows 兼容性问题
         first_err = res.stderr
         raw_bytes = src_path.read_bytes()
         decoded_text, src_enc = detect_and_convert_encoding(raw_bytes)
@@ -174,7 +285,6 @@ class ProjectCompiler:
         needs_compat = False
         compat_reasons = []
 
-        # 检查是否包含 Windows 专有标识
         if any(wh in first_err for wh in WINDOWS_HEADERS) or any(
             k in decoded_text for k in ["windows.h", "conio.h", "system(\"pause\")", "system(\"PAUSE\")", "scanf_s"]
         ):
@@ -192,12 +302,19 @@ class ProjectCompiler:
             compat_src_path.write_text(compat_code, encoding="utf-8")
 
             compat_sources = [compat_src_path] + (extra_sources or [])
-            compat_cmd = [compiler, std_flag] + COMMON_CFLAGS + [str(s) for s in compat_sources] + ["-o", str(bin_path)]
+            compat_cmd = [compiler, std_flag] + COMPILER_FLAGS + inc_args + [str(s.resolve()) for s in compat_sources] + ["-o", str(bin_path)] + LINKER_FLAGS
+
+            wrapped_compat_cmd = compat_cmd
+            try:
+                if shutil.which("unshare"):
+                    wrapped_compat_cmd = ["unshare", "--user", "-n"] + compat_cmd
+            except Exception:
+                pass
 
             start_time = time.time()
             try:
                 compat_res = subprocess.run(
-                    compat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30
+                    wrapped_compat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 success = compat_res.returncode == 0 and bin_path.exists()
@@ -229,14 +346,13 @@ class ProjectCompiler:
                 return CompileResult(
                     success=False,
                     command=compat_cmd,
-                    stderr="兼容重编译超时 (30s)",
+                    stderr="兼容重编译超时 (20s)",
                     exit_code=-1,
                     duration_ms=duration_ms,
                     compat_applied=True,
                     compat_reasons=compat_reasons,
                 )
 
-        # 非环境兼容问题，确属语法或程序错误
         duration_ms = (time.time() - start_time) * 1000
         self._write_log(log_path, cmd, res.stdout, res.stderr, res.returncode, duration_ms, False, [])
         return CompileResult(
