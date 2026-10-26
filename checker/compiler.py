@@ -4,6 +4,7 @@ GCC/G++ 编译引擎与 Windows 环境差异自动化兼容转换模块
 """
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -22,90 +23,89 @@ WINDOWS_HEADERS = ["windows.h", "conio.h", "tchar.h", "stdafx.h", "io.h"]
 SCANF_S_SHIM = r"""/* [COMPAT SHIM] MSVC scanf_s implementation for GCC/Linux */
 #include <stdio.h>
 #include <stdarg.h>
-#include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 
 static int _labchecker_scanf_s(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    char line[1024];
-    if (!fgets(line, sizeof(line), stdin)) {
-        va_end(ap);
-        return EOF;
-    }
     const char *p = fmt;
-    const char *inp = line;
     int matched = 0;
-    while (*p && *inp) {
-        if (*p == ' ' || *p == '\t' || *p == '\n') {
-            while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
-            p++;
+
+    while (*p) {
+        if (isspace((unsigned char)*p)) {
+            while (isspace((unsigned char)*p)) p++;
+            int c;
+            while ((c = fgetc(stdin)) != EOF && isspace((unsigned char)c));
+            if (c != EOF) ungetc(c, stdin);
             continue;
         }
+
         if (*p == '%') {
-            p++;
+            const char *start = p++;
+            if (*p == '%') {
+                int c = fgetc(stdin);
+                if (c != '%') { if (c != EOF) ungetc(c, stdin); break; }
+                p++;
+                continue;
+            }
+
             int is_suppress = 0;
             if (*p == '*') { is_suppress = 1; p++; }
-            char mod[4] = {0};
-            int m_idx = 0;
-            while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'z') {
-                if (m_idx < 3) mod[m_idx++] = *p;
-                p++;
-            }
+
+            while (isdigit((unsigned char)*p)) p++;
+            while (*p == 'h' || *p == 'l' || *p == 'L' || *p == 'z' || *p == 'j' || *p == 't') p++;
+
             char spec = *p++;
+            char sub_fmt[32] = {0};
+            int len = (int)(p - start);
+            if (len < 31) strncpy(sub_fmt, start, len);
+
             if (spec == 'c') {
                 void *ptr = is_suppress ? NULL : va_arg(ap, void*);
                 unsigned sz = is_suppress ? 0 : va_arg(ap, unsigned);
                 (void)sz;
-                if (ptr && *inp) {
-                    *(char*)ptr = *inp++;
-                    matched++;
-                }
+                int c = fgetc(stdin);
+                if (c == EOF) { if (matched == 0) matched = EOF; break; }
+                if (ptr) { *(char*)ptr = (char)c; matched++; }
             } else if (spec == 's') {
                 char *ptr = is_suppress ? NULL : va_arg(ap, char*);
                 unsigned sz = is_suppress ? 0 : va_arg(ap, unsigned);
-                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
-                int cnt = 0;
-                while (*inp && *inp != ' ' && *inp != '\t' && *inp != '\n' && (sz == 0 || cnt + 1 < (int)sz)) {
-                    if (ptr) ptr[cnt] = *inp;
-                    cnt++;
-                    inp++;
+                int c;
+                while ((c = fgetc(stdin)) != EOF && isspace((unsigned char)c));
+                if (c == EOF) { if (matched == 0) matched = EOF; break; }
+                unsigned cnt = 0;
+                while (c != EOF && !isspace((unsigned char)c)) {
+                    if (ptr && (sz == 0 || cnt + 1 < sz)) ptr[cnt++] = (char)c;
+                    c = fgetc(stdin);
                 }
-                if (ptr && cnt > 0) {
-                    ptr[cnt] = '\0';
-                    matched++;
-                }
-            } else if (spec == 'd' || spec == 'i') {
+                if (c != EOF) ungetc(c, stdin);
+                if (ptr) { ptr[cnt] = '\0'; matched++; }
+            } else {
                 void *ptr = is_suppress ? NULL : va_arg(ap, void*);
-                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
-                char *endp;
-                long val = strtol(inp, &endp, (spec == 'i' ? 0 : 10));
-                if (endp > inp) {
-                    if (ptr) {
-                        if (strcmp(mod, "hd") == 0 || strcmp(mod, "h") == 0) *(short*)ptr = (short)val;
-                        else if (strcmp(mod, "ld") == 0 || strcmp(mod, "l") == 0) *(long*)ptr = val;
-                        else *(int*)ptr = (int)val;
-                    }
-                    inp = endp;
-                    matched++;
-                }
-            } else if (spec == 'f' || spec == 'g' || spec == 'e') {
-                void *ptr = is_suppress ? NULL : va_arg(ap, void*);
-                while (*inp == ' ' || *inp == '\t' || *inp == '\n') inp++;
-                char *endp;
-                double val = strtod(inp, &endp);
-                if (endp > inp) {
-                    if (ptr) {
-                        if (strcmp(mod, "l") == 0 || strcmp(mod, "lf") == 0) *(double*)ptr = val;
-                        else *(float*)ptr = (float)val;
-                    }
-                    inp = endp;
-                    matched++;
+                if (is_suppress) {
+                    #pragma GCC diagnostic push
+                    #pragma GCC diagnostic ignored "-Wformat-security"
+                    int r = fscanf(stdin, sub_fmt);
+                    #pragma GCC diagnostic pop
+                    if (r == EOF) { if (matched == 0) matched = EOF; break; }
+                } else {
+                    #pragma GCC diagnostic push
+                    #pragma GCC diagnostic ignored "-Wformat-security"
+                    int r = fscanf(stdin, sub_fmt, ptr);
+                    #pragma GCC diagnostic pop
+                    if (r == 1) matched++;
+                    else if (r == EOF) { if (matched == 0) matched = EOF; break; }
+                    else break;
                 }
             }
         } else {
-            if (*inp == *p) { inp++; p++; }
-            else break;
+            int c = fgetc(stdin);
+            if (c != (unsigned char)*p) {
+                if (c != EOF) ungetc(c, stdin);
+                break;
+            }
+            p++;
         }
     }
     va_end(ap);
