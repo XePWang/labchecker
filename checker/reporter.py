@@ -33,7 +33,7 @@ class LabReporter:
         mock_mode: bool = False,
     ) -> Dict[str, Path]:
         """生成全套标准报表并返回文件路径字典"""
-        csv_detail_path = self.generate_detail_csv(roster_students, grades)
+        csv_detail_path = self.generate_detail_csv(roster_students, grades, mock_mode=mock_mode)
         md_summary_path = self.generate_summary_markdown(
             roster_students,
             grades,
@@ -60,9 +60,11 @@ class LabReporter:
         self,
         roster_students: List[Student],
         grades: Dict[str, StudentGrade],
+        mock_mode: bool = False,
     ) -> Path:
-        """导出 labX结果.csv"""
-        file_path = self.output_dir / f"{self.lab_id}结果.csv"
+        """导出 labX结果.csv (模拟模式下加 mock_ 前缀)"""
+        prefix = "mock_" if mock_mode else ""
+        file_path = self.output_dir / f"{prefix}{self.lab_id}结果.csv"
 
         fieldnames = [
             "序号", "学号", "姓名", "班级", "实验总分", "提交状态",
@@ -119,7 +121,10 @@ class LabReporter:
                     })
                     continue
 
-                total_sc_display = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
+                if mock_mode:
+                    total_sc_display = f"[模拟] {grade.total_score:.2f}" if not grade.is_pending else "待定(模拟)"
+                else:
+                    total_sc_display = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
 
                 if not grade.problem_results:
                     writer.writerow({
@@ -143,45 +148,47 @@ class LabReporter:
                 else:
                     for pid, prob in grade.problem_results.items():
                         c_status = "-"
-                    compat_str = "无"
-                    if prob.compile_result:
-                        c_status = "成功" if prob.compile_result.success else "失败"
-                        if prob.compile_result.compat_applied:
-                            compat_str = "; ".join(prob.compile_result.compat_reasons)
+                        compat_str = "无"
+                        if prob.compile_result:
+                            c_status = "成功" if prob.compile_result.success else "失败"
+                            if prob.compile_result.compat_applied:
+                                compat_str = "; ".join(prob.compile_result.compat_reasons)
 
-                    sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
-                    pass_rate = ""
-                    if prob.test_results:
-                        p_cnt = sum(1 for t in prob.test_results if t.passed)
-                        pass_rate = f"{p_cnt}/{len(prob.test_results)}"
+                        sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
+                        pass_rate = ""
+                        if prob.test_results:
+                            p_cnt = sum(1 for t in prob.test_results if t.passed)
+                            pass_rate = f"{p_cnt}/{len(prob.test_results)}"
 
-                    notes_str = "; ".join(prob.notes)
-                    if prob.ai_review:
-                        ai_sc = prob.ai_review.get("suggested_score")
-                        ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
-                        mock_tag = "[模拟/Mock] " if prob.ai_review.get("is_mock") else ""
-                        notes_str += f" | {mock_tag}AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
+                        notes_str = "; ".join(prob.notes)
+                        if prob.ai_review:
+                            ai_sc = prob.ai_review.get("suggested_score")
+                            ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
+                            mock_tag = "[模拟/Mock] " if prob.ai_review.get("is_mock") or mock_mode else ""
+                            notes_str += f" | {mock_tag}AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
 
-                    prob_sc_display = "待定" if prob.is_pending else f"{prob.score:.2f}"
+                        prob_sc_display = "待定" if prob.is_pending else f"{prob.score:.2f}"
+                        if mock_mode and not prob.is_pending:
+                            prob_sc_display = f"[模拟] {prob.score:.2f}"
 
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": total_sc_display,
-                        "提交状态": grade.status,
-                        "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
-                        "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
-                        "题号": pid,
-                        "题目满分": f"{prob.max_score:.2f}",
-                        "题目得分": prob_sc_display,
-                        "子项得分": sub_str,
-                        "编译状态": c_status,
-                        "兼容处理": compat_str,
-                        "测试通过情况": pass_rate,
-                        "AI评审/备注": notes_str,
-                    })
+                        writer.writerow({
+                            "序号": student.seq,
+                            "学号": student.student_id,
+                            "姓名": student.name,
+                            "班级": student.class_id,
+                            "实验总分": total_sc_display,
+                            "提交状态": grade.status,
+                            "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
+                            "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
+                            "题号": pid,
+                            "题目满分": f"{prob.max_score:.2f}",
+                            "题目得分": prob_sc_display,
+                            "子项得分": sub_str,
+                            "编译状态": c_status,
+                            "兼容处理": compat_str,
+                            "测试通过情况": pass_rate,
+                            "AI评审/备注": notes_str,
+                        })
 
                 # 记录选做题
                 for opid, oprob in grade.optional_results.items():
@@ -335,9 +342,12 @@ class LabReporter:
         导出 labX实验成绩单.csv
         格式完全对齐官方模板：
         序号,学生学号,学生姓名,分数(5),实验评语（不少于50字）
+        模拟模式下加上 mock_ 前缀与模拟标识
         """
-        file_path = self.output_dir / f"{self.lab_id}实验成绩单.csv"
-        fieldnames = ["序号", "学生学号", "学生姓名", "分数(5)", "实验评语（不少于50字）"]
+        prefix = "mock_" if mock_mode else ""
+        file_path = self.output_dir / f"{prefix}{self.lab_id}实验成绩单.csv"
+        score_header = "分数(5)[模拟测试非正式]" if mock_mode else "分数(5)"
+        fieldnames = ["序号", "学生学号", "学生姓名", score_header, "实验评语（不少于50字）"]
 
         with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -346,26 +356,26 @@ class LabReporter:
             for student in roster_students:
                 grade = grades.get(student.student_id)
                 if not grade or grade.status == "missing":
-                    score_str = "0.00"
+                    score_str = "[模拟] 0.00" if mock_mode else "0.00"
                     comment = (
                         f"{student.name}同学你好！系统未检测到你在本实验中的代码提交，请核查是否提交逾期或命名格式存在偏差。"
                         f"按教学大纲要求，请尽快联系助教补交并进行复核，以便及时核对并确认实验平时成绩。"
                     )
                 elif grade.is_pending or grade.status in {"ambiguous", "conflict"}:
-                    score_str = "待定"
+                    score_str = "[模拟] 待定" if mock_mode else "待定"
                     comment = grade.comment or (
                         f"{student.name}同学你好！本次实验提交材料存在待人工复核事项（如归属多学号冲突或材料字迹待定），"
                         f"系统暂未直接给出最终分数。请主动联系助教进行现场核实与登记，确保成绩准确无误。"
                     )
                 else:
-                    score_str = f"{grade.total_score:.2f}"
+                    score_str = f"[模拟] {grade.total_score:.2f}" if mock_mode else f"{grade.total_score:.2f}"
                     comment = grade.comment
 
                 writer.writerow({
                     "序号": student.seq,
                     "学生学号": student.student_id,
                     "学生姓名": student.name,
-                    "分数(5)": score_str,
+                    score_header: score_str,
                     "实验评语（不少于50字）": comment,
                 })
 
@@ -381,7 +391,8 @@ class LabReporter:
         """如果存在官方 Excel 模板，同步填写对应 sheet 并另存"""
         try:
             import openpyxl
-            dest_path = self.output_dir / f"{self.lab_id}实验成绩单.xlsx"
+            prefix = "mock_" if mock_mode else ""
+            dest_path = self.output_dir / f"{prefix}{self.lab_id}实验成绩单.xlsx"
             shutil.copy2(template_path, dest_path)
 
             wb = openpyxl.load_workbook(str(dest_path))
@@ -391,21 +402,24 @@ class LabReporter:
 
             ws = wb[sheet_title]
 
+            if mock_mode:
+                ws.cell(row=2, column=4, value="分数(5)[模拟测试非正式]")
+
             for idx, student in enumerate(roster_students, start=3):
                 grade = grades.get(student.student_id)
                 if not grade or grade.status == "missing":
-                    val_score = 0.0
+                    val_score = "[模拟] 0.00" if mock_mode else 0.0
                     comment = (
                         f"{student.name}同学你好！系统未检测到你在本实验中的代码提交，请核查是否提交逾期或命名格式存在偏差。"
                         f"按教学大纲要求，请尽快联系助教补交并进行复核，以便及时核对并确认实验平时成绩。"
                     )
                 elif grade.is_pending or grade.status in {"ambiguous", "conflict"}:
-                    val_score = "待定"
+                    val_score = "[模拟] 待定" if mock_mode else "待定"
                     comment = grade.comment or (
                         f"{student.name}同学你好！本次实验提交材料存在待人工复核事项，成绩暂保持待定状态，请联系助教核实。"
                     )
                 else:
-                    val_score = round(grade.total_score, 2)
+                    val_score = f"[模拟] {grade.total_score:.2f}" if mock_mode else round(grade.total_score, 2)
                     comment = grade.comment
 
                 ws.cell(row=idx, column=1, value=student.seq)
@@ -423,16 +437,21 @@ class LabReporter:
         self,
         student: Student,
         grade: StudentGrade,
+        mock_mode: bool = False,
     ) -> Dict[str, Path]:
         """为单人重判导出专用的独立报表，避免覆盖其他学生成绩"""
-        detail_path = self.output_dir / f"single_{student.student_id}_{self.lab_id}结果.csv"
+        prefix = "mock_" if mock_mode else ""
+        detail_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}结果.csv"
         fieldnames = [
             "序号", "学号", "姓名", "班级", "实验总分", "提交状态",
             "待人工复核", "复核原因", "题号", "题目满分", "题目得分",
             "子项得分", "编译状态", "兼容处理", "测试通过情况", "AI评审/备注"
         ]
 
-        total_sc_str = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
+        if mock_mode:
+            total_sc_str = "待定(模拟)" if grade.is_pending else f"[模拟] {grade.total_score:.2f}"
+        else:
+            total_sc_str = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
 
         with open(detail_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -459,47 +478,87 @@ class LabReporter:
             else:
                 for pid, prob in grade.problem_results.items():
                     c_status = "-"
-                compat_str = "无"
-                if prob.compile_result:
-                    c_status = "成功" if prob.compile_result.success else "失败"
-                    if prob.compile_result.compat_applied:
-                        compat_str = "; ".join(prob.compile_result.compat_reasons)
+                    compat_str = "无"
+                    if prob.compile_result:
+                        c_status = "成功" if prob.compile_result.success else "失败"
+                        if prob.compile_result.compat_applied:
+                            compat_str = "; ".join(prob.compile_result.compat_reasons)
 
-                sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
-                pass_rate = ""
-                if prob.test_results:
-                    p_cnt = sum(1 for t in prob.test_results if t.passed)
-                    pass_rate = f"{p_cnt}/{len(prob.test_results)}"
+                    sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
+                    pass_rate = ""
+                    if prob.test_results:
+                        p_cnt = sum(1 for t in prob.test_results if t.passed)
+                        pass_rate = f"{p_cnt}/{len(prob.test_results)}"
 
-                notes_str = "; ".join(prob.notes)
-                if prob.ai_review:
-                    ai_sc = prob.ai_review.get("suggested_score")
-                    ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
-                    notes_str += f" | AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
+                    notes_str = "; ".join(prob.notes)
+                    if prob.ai_review:
+                        ai_sc = prob.ai_review.get("suggested_score")
+                        ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
+                        mock_tag = "[模拟/Mock] " if prob.ai_review.get("is_mock") or mock_mode else ""
+                        notes_str += f" | {mock_tag}AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
 
-                prob_sc_str = "待定" if prob.is_pending else f"{prob.score:.2f}"
+                    prob_sc_str = "待定" if prob.is_pending else f"{prob.score:.2f}"
+                    if mock_mode and not prob.is_pending:
+                        prob_sc_str = f"[模拟] {prob.score:.2f}"
 
-                writer.writerow({
-                    "序号": student.seq,
-                    "学号": student.student_id,
-                    "姓名": student.name,
-                    "班级": student.class_id,
-                    "实验总分": total_sc_str,
-                    "提交状态": grade.status,
-                    "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
-                    "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
-                    "题号": pid,
-                    "题目满分": f"{prob.max_score:.2f}",
-                    "题目得分": prob_sc_str,
-                    "子项得分": sub_str,
-                    "编译状态": c_status,
-                    "兼容处理": compat_str,
-                    "测试通过情况": pass_rate,
-                    "AI评审/备注": notes_str,
-                })
+                    writer.writerow({
+                        "序号": student.seq,
+                        "学号": student.student_id,
+                        "姓名": student.name,
+                        "班级": student.class_id,
+                        "实验总分": total_sc_str,
+                        "提交状态": grade.status,
+                        "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
+                        "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
+                        "题号": pid,
+                        "题目满分": f"{prob.max_score:.2f}",
+                        "题目得分": prob_sc_str,
+                        "子项得分": sub_str,
+                        "编译状态": c_status,
+                        "兼容处理": compat_str,
+                        "测试通过情况": pass_rate,
+                        "AI评审/备注": notes_str,
+                    })
 
-        md_path = self.output_dir / f"single_{student.student_id}_{self.lab_id}报告.md"
-        md_content = f"""# 《程序设计思维与实践》{self.lab_id.upper()} 单人评测报告 ({student.student_id} {student.name})
+                for opid, oprob in grade.optional_results.items():
+                    c_status = "-"
+                    compat_str = "无"
+                    if oprob.compile_result:
+                        c_status = "成功" if oprob.compile_result.success else "失败"
+                        if oprob.compile_result.compat_applied:
+                            compat_str = "; ".join(oprob.compile_result.compat_reasons)
+
+                    pass_rate = ""
+                    if oprob.test_results:
+                        p_cnt = sum(1 for t in oprob.test_results if t.passed)
+                        pass_rate = f"{p_cnt}/{len(oprob.test_results)}"
+
+                    op_sc_str = "待定" if oprob.is_pending else f"{oprob.score:.2f}"
+                    if mock_mode and not oprob.is_pending:
+                        op_sc_str = f"[模拟] {oprob.score:.2f}"
+
+                    writer.writerow({
+                        "序号": student.seq,
+                        "学号": student.student_id,
+                        "姓名": student.name,
+                        "班级": student.class_id,
+                        "实验总分": total_sc_str,
+                        "提交状态": grade.status,
+                        "待人工复核": "是" if oprob.needs_review else "否",
+                        "复核原因": "; ".join(oprob.review_reasons),
+                        "题号": f"选做-{opid}",
+                        "题目满分": f"{oprob.max_score:.2f}",
+                        "题目得分": op_sc_str,
+                        "子项得分": "选做题",
+                        "编译状态": c_status,
+                        "兼容处理": compat_str,
+                        "测试通过情况": pass_rate,
+                        "AI评审/备注": "; ".join(oprob.notes) or "选做题已记录",
+                    })
+
+        md_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}报告.md"
+        mock_title = "【模拟测试非正式】" if mock_mode else ""
+        md_content = f"""# {mock_title}《程序设计思维与实践》{self.lab_id.upper()} 单人评测报告 ({student.student_id} {student.name})
 
 - **学号**: {student.student_id}
 - **姓名**: {student.name}
@@ -522,6 +581,10 @@ class LabReporter:
         """从历史保存的 labX结果.csv 与 labX实验成绩单.csv 恢复已评测学生记录"""
         detail_path = self.output_dir / f"{self.lab_id}结果.csv"
         roster_csv_path = self.output_dir / f"{self.lab_id}实验成绩单.csv"
+        if not detail_path.exists() and (self.output_dir / f"mock_{self.lab_id}结果.csv").exists():
+            detail_path = self.output_dir / f"mock_{self.lab_id}结果.csv"
+        if not roster_csv_path.exists() and (self.output_dir / f"mock_{self.lab_id}实验成绩单.csv").exists():
+            roster_csv_path = self.output_dir / f"mock_{self.lab_id}实验成绩单.csv"
 
         recovered: Dict[str, StudentGrade] = {}
         roster_map = {s.student_id: s for s in roster_students}
@@ -552,14 +615,15 @@ class LabReporter:
                         std = roster_map[sid]
                         if sid not in recovered:
                             tot_sc_str = row.get("实验总分", "0.00").strip()
+                            clean_tot_str = tot_sc_str.replace("[模拟]", "").replace("(模拟)", "").strip()
                             try:
-                                tot_sc = float(tot_sc_str) if tot_sc_str != "待定" else 0.0
+                                tot_sc = float(clean_tot_str) if "待定" not in clean_tot_str else 0.0
                             except ValueError:
                                 tot_sc = 0.0
 
                             st = row.get("提交状态", "missing").strip()
                             nr = (row.get("待人工复核", "否").strip() == "是")
-                            is_pend = (tot_sc_str == "待定")
+                            is_pend = ("待定" in tot_sc_str)
 
                             reasons = [r.strip() for r in row.get("复核原因", "").split(";") if r.strip()]
                             g = StudentGrade(
@@ -576,8 +640,9 @@ class LabReporter:
                         pid = row.get("题号", "").strip()
                         if pid and pid != "全":
                             prob_sc_str = row.get("题目得分", "0.00").strip()
+                            clean_prob_str = prob_sc_str.replace("[模拟]", "").replace("(模拟)", "").strip()
                             try:
-                                p_sc = float(prob_sc_str) if prob_sc_str != "待定" else 0.0
+                                p_sc = float(clean_prob_str) if "待定" not in clean_prob_str else 0.0
                             except ValueError:
                                 p_sc = 0.0
                             prob_res = ProblemResult(
@@ -585,10 +650,13 @@ class LabReporter:
                                 score=p_sc,
                                 max_score=float(row.get("题目满分", 0.0) or 0.0),
                                 status="passed" if p_sc > 0 else "failed",
-                                is_pending=(prob_sc_str == "待定"),
+                                is_pending=("待定" in prob_sc_str),
                                 notes=[row.get("AI评审/备注", "")],
                             )
-                            recovered[sid].problem_results[pid] = prob_res
+                            if pid.startswith("选做-"):
+                                recovered[sid].optional_results[pid.replace("选做-", "")] = prob_res
+                            else:
+                                recovered[sid].problem_results[pid] = prob_res
             except Exception:
                 pass
 

@@ -130,12 +130,14 @@ def run_lab(
         # 单人重判模式：生成独立单人报表，并在历史全班成绩存在时安全合并更新，严防全班 0 分覆盖
         target_student = students_to_grade[0]
         target_grade = grades[target_student.student_id]
-        single_paths = reporter.generate_single_student_report(target_student, target_grade)
+        single_paths = reporter.generate_single_student_report(target_student, target_grade, mock_mode=mock_ai)
         print(f"[+] 单人独立报表生成完毕:")
         print(f"  - 单人详细记录: {single_paths['detail_csv']}")
         print(f"  - 单人总结报告: {single_paths['summary_md']}")
 
         detail_batch = output_dir / f"{lab_name}结果.csv"
+        if not detail_batch.exists() and mock_ai:
+            detail_batch = output_dir / f"mock_{lab_name}结果.csv"
         if detail_batch.exists():
             print(f"[*] 检测到历史批次成绩文件，正在安全合并单人结果并更新全班成绩单...")
             merged_grades = reporter.load_existing_grades_from_files(roster_mgr.students)
