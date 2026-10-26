@@ -4,6 +4,7 @@ AI4study 核心模块：对接 Antigravity (agy) CLI，实现手写多模态视�
 严格实行任务身份校验、分项取值范围限定、程序自算总分及待定状态保留
 """
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -242,10 +243,36 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
                 "review_reason": "AI 任务身份异常，成绩待定",
             }
 
+        # 校验学生个人身份（学号与姓名）
+        obs_id = str(res.get("student_id_observed") or "").strip()
+        obs_name = str(res.get("name_observed") or "").strip()
+        expected_id = str(student_id).strip()
+        expected_name = str(student_name).strip()
+
+        identity_conflict = False
+        conflict_details = []
+
+        if obs_id and obs_id != expected_id:
+            identity_conflict = True
+            conflict_details.append(f"观察学号 {obs_id} 与预期学号 {expected_id} 不符")
+
+        if obs_name and expected_name and obs_name != expected_name:
+            identity_conflict = True
+            conflict_details.append(f"观察姓名 {obs_name} 与预期姓名 {expected_name} 不符")
+
         try:
             raw_info = float(res.get("info_score", 0.0))
             raw_xy = float(res.get("xy_match_score", 0.0))
             raw_deriv = float(res.get("derivation_score", 0.0))
+
+            if identity_conflict:
+                res["needs_review"] = True
+                err_msg = f"演草纸学生身份矛盾: {'; '.join(conflict_details)}"
+                old_reason = res.get("review_reason", "")
+                res["review_reason"] = f"{old_reason}; {err_msg}" if old_reason else err_msg
+                raw_info = 0.0
+                raw_xy = 0.0
+                raw_deriv = 0.0
 
             # 强制分项数值钳位
             info_score = max(0.0, min(0.5, raw_info))
