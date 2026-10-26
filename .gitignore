@@ -1,6 +1,25 @@
-build/
-参考文件/
+# 临时工作区与通用缓存
 .work/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# 原始只读参考文件 (包含真实花名册与教师信息)
+参考文件/
+refs/
+
+# 构建输出与全局 build 根目录
+/build/
+
+# 各实验空间：仅保留 README.md 作为目录结构占位，忽略所有真实学生数据、提交包、编译产物与成绩单
+lab*/submit/*
+!lab*/submit/README.md
+
+lab*/src/*
+!lab*/src/README.md
+
+lab*/build/*
+!lab*/build/README.md
+
+lab*/output/*
+!lab*/output/README.md

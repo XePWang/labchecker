@@ -66,16 +66,23 @@
 # 执行 Lab 1 批量判题 (真实 AI 模式)
 python3 -m checker --lab lab1
 
+# 评测前自动清空旧的 src/, build/, output/ 目录进行全新重测
+python3 -m checker --lab lab1 --clean
+
 # 执行 Lab 2 批量判题 (使用 Mock AI 离线快速评测)
 python3 -m checker --lab lab2 --mock-ai
 
 # 同时执行 Lab 1 与 Lab 2
-python3 -m checker --lab all --mock-ai
+python3 -m checker --lab all --clean --mock-ai
 
 # 仅评测指定学号的学生提交
 python3 -m checker --lab lab1 --student-id 2026110067
 
-# 运行全套单元与集成测试
+# 也可以直接运行各实验目录下的独立脚本
+python3 lab1/main.py --clean
+python3 lab2/main.py --clean
+
+# 运行全套单元与集成测试 (100% 完全脱敏)
 python3 -m unittest -v tests/test_checker.py
 ```
 
@@ -83,7 +90,11 @@ python3 -m unittest -v tests/test_checker.py
 
 ## 3. 核心设计与防坑机制
 
-### 3.1 临时目录规范 (`.work`)
+### 3.1 开源脱敏规范与重测工作流
+- **零隐私泄露**：Git 仓库严格仅保留各实验目录下 `submit/`、`src/`、`build/`、`output/` 的基础 `README.md` 目录说明，任何学生提交源码、姓名、学号、手机号及生成成绩单均受 `.gitignore` 保护，开源发布时确保零敏感数据泄露。
+- **自由清空与重跑**：支持随时删除或替换 `submit/` 内容。重新测试时可手动删除（或通过 `--clean` 命令行参数自动清空）`src/`、`build/`、`output/`，判题机运行时会自动重新建立目录结构并全自动完成归档规范化、编译与评分。
+
+### 3.2 临时目录规范 (`.work`)
 所有判题过程中的解压中间文件、临时单测数据、运行时工作目录均限制在 `.work/` 下，已写入 `.gitignore` 并受 `AGENTS.md` 约束，保持提交目录与源码目录的纯净与只读追溯性。
 
 ### 3.2 严密防范 Zip Slip 路径越界

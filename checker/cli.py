@@ -3,6 +3,7 @@ checker.cli
 判题系统命令行交互入口
 """
 import argparse
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict
@@ -22,6 +23,7 @@ def run_lab(
     template_path: Path,
     mock_ai: bool = False,
     single_student_id: str = "",
+    clean: bool = False,
 ) -> int:
     """运行指定实验的完整判题流水线"""
     lab_name = lab_id.lower()
@@ -31,23 +33,36 @@ def run_lab(
     print(f"🚀 开始执行《程序设计思维与实践》{lab_name.upper()} 批量判题流水线")
     print(f"==========================================")
 
-    # 1. 加载花名册
-    print(f"[*] 正在加载点名册: {roster_path}...")
-    roster_mgr = RosterManager(roster_path)
-    total_students = len(roster_mgr.students)
-    print(f"[+] 成功加载点名册学生: {total_students} 人")
-
-    # 2. 识别、解压并规范化提交文件
+    # 1. 目录初始化与可选清理
     submit_dir = lab_root / "submit"
     src_dir = lab_root / "src"
     build_dir = lab_root / "build"
     output_dir = lab_root / "output"
+
+    if clean:
+        print(f"[*] 正在执行前置清理: 清空 {lab_name} 下的 src/, build/, output/ 缓存...")
+        for d in [src_dir, build_dir, output_dir]:
+            if d.exists():
+                for item in d.iterdir():
+                    if item.name.lower() in {"readme.md", ".gitkeep"}:
+                        continue
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
 
     submit_dir.mkdir(parents=True, exist_ok=True)
     src_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 2. 加载花名册
+    print(f"[*] 正在加载点名册: {roster_path}...")
+    roster_mgr = RosterManager(roster_path)
+    total_students = len(roster_mgr.students)
+    print(f"[+] 成功加载点名册学生: {total_students} 人")
+
+    # 3. 识别、解压并规范化提交文件
     print(f"[*] 正在从 {submit_dir} 识别并规范化学生提交...")
     normalizer = SubmissionNormalizer(roster_mgr, lab_name, lab_root)
     student_files_map = normalizer.process_all_submissions()
@@ -138,6 +153,11 @@ def main():
         help="使用 Mock 模式模拟 AI4study 多模态批改与语义复核（适合离线快速测试）",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="评测前先清空旧的 src/, build/, output/ 缓存目录",
+    )
+    parser.add_argument(
         "--student-id",
         type=str,
         default="",
@@ -159,6 +179,7 @@ def main():
             template_path=args.template,
             mock_ai=args.mock_ai,
             single_student_id=args.student_id,
+            clean=args.clean,
         )
         if ret != 0:
             exit_code = ret

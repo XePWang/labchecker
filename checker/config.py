@@ -13,8 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = PROJECT_ROOT / ".work"
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-# 默认参考文件与点名册路径
+# 默认参考文件与点名册路径 (兼容 "参考文件" 或 "refs")
 REF_DIR = PROJECT_ROOT / "参考文件"
+if not REF_DIR.exists() and (PROJECT_ROOT / "refs").exists():
+    REF_DIR = PROJECT_ROOT / "refs"
+
 DEFAULT_ROSTER_PATH = REF_DIR / "郝萌(2026-2027-1-22CS14003-003-A)点名册.xls"
 DEFAULT_TEMPLATE_PATH = REF_DIR / "实验成绩单_组号_任课老师姓名.xlsx"
 

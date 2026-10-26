@@ -171,11 +171,12 @@ class LabReporter:
             if s.student_id in grades and grades[s.student_id].needs_review
         ]
 
+        sub_pct = round(submitted_count / total_roster * 100, 1) if total_roster > 0 else 0.0
         lines = [
             f"# 《程序设计思维与实践》{self.lab_id.upper()} 批量评测报告\n",
             "## 一、 整体评测概况",
             f"- **点名册应交人数**: {total_roster} 人",
-            f"- **实际提交人数**: {submitted_count} 人 ({round(submitted_count/total_roster*100, 1)}%)",
+            f"- **实际提交人数**: {submitted_count} 人 ({sub_pct}%)",
             f"- **未提交/缺考人数**: {missing_count} 人",
             f"- **满分 (5.0分) 人数**: {full_score_count} 人",
             f"- **提交有效平均分**: {avg_score} 分 (最高分: {max_score}, 最低分: {min_score})",

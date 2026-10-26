@@ -21,10 +21,11 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 ALLOWED_DOC_EXTS = {".docx", ".doc", ".pdf", ".txt", ".md"}
 KNOWN_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".rar", ".7z"}
 
-# 忽略的垃圾文件与系统隐藏目录
+# 忽略的垃圾文件、说明文件与系统隐藏目录
 IGNORED_PATTERNS = {
     "__MACOSX", ".DS_Store", "Thumbs.db", "desktop.ini",
-    ".git", ".vs", ".vscode", "Debug", "Release", "x64", "x86"
+    ".git", ".vs", ".vscode", "Debug", "Release", "x64", "x86",
+    "README.md", "readme.md", ".gitkeep"
 }
 
 

@@ -1,6 +1,6 @@
 """
 tests/test_checker.py
-判题机全覆盖单元与集成测试套件
+判题机全覆盖单元与集成测试套件（完全脱敏，无任何硬编码个人真实数据）
 """
 import io
 import os
@@ -28,35 +28,47 @@ class TestCheckerSystem(unittest.TestCase):
     def setUpClass(cls):
         cls.test_work = WORK_DIR / "test_runs"
         cls.test_work.mkdir(parents=True, exist_ok=True)
-        cls.roster_mgr = RosterManager(DEFAULT_ROSTER_PATH)
+
+        # 若真实点名册存在则加载，否则动态构造脱敏单测专用花名册
+        cls.roster_mgr = RosterManager()
+        if DEFAULT_ROSTER_PATH.exists():
+            cls.roster_mgr.load_roster(DEFAULT_ROSTER_PATH)
+        else:
+            cls.roster_mgr.students = [
+                Student(seq=1, student_id="2026000067", name="测试生甲", class_id="260101"),
+                Student(seq=2, student_id="2026000090", name="测试生乙", class_id="260101"),
+            ]
+            for s in cls.roster_mgr.students:
+                cls.roster_mgr.by_id[s.student_id] = s
+                cls.roster_mgr.by_name.setdefault(s.name, []).append(s)
 
     @classmethod
     def tearDownClass(cls):
-        # 清理测试运行缓存
         if cls.test_work.exists():
             shutil.rmtree(cls.test_work, ignore_errors=True)
 
     def test_01_roster_parsing(self):
         """测试 1: 点名册解析与学生身份匹配"""
-        self.assertGreater(len(self.roster_mgr.students), 80)
+        self.assertGreater(len(self.roster_mgr.students), 0)
         s1 = self.roster_mgr.students[0]
-        self.assertEqual(s1.student_id, "2026110067")
-        self.assertEqual(s1.name, "梁宜")
+        self.assertTrue(len(s1.student_id) >= 8)
+        self.assertTrue(len(s1.name) >= 2)
 
-        # 匹配测试
-        matched, cands, reason = self.roster_mgr.match_student_from_text("2612901_梁宜_2026110067_实验1.zip")
+        # 动态匹配测试
+        sample_text = f"2612901_{s1.name}_{s1.student_id}_实验1.zip"
+        matched, cands, reason = self.roster_mgr.match_student_from_text(sample_text)
         self.assertIsNotNone(matched)
-        self.assertEqual(matched.student_id, "2026110067")
+        self.assertEqual(matched.student_id, s1.student_id)
 
         # 模糊空格/下划线测试
-        matched2, _, _ = self.roster_mgr.match_student_from_text("2026110090  黄明杨  Lab 1-2.c")
+        s2 = self.roster_mgr.students[1] if len(self.roster_mgr.students) > 1 else s1
+        matched2, _, _ = self.roster_mgr.match_student_from_text(f"{s2.student_id}  {s2.name}  Lab 1-2.c")
         self.assertIsNotNone(matched2)
-        self.assertEqual(matched2.student_id, "2026110090")
+        self.assertEqual(matched2.student_id, s2.student_id)
 
     def test_02_safe_unpack_and_zipslip_protection(self):
         """测试 2: Zip Slip 恶意路径穿越防御与正常解压"""
         malicious_zip = self.test_work / "malicious.zip"
-        # 构造包含 ../../etc/evil.txt 路径的恶意 zip
         with zipfile.ZipFile(malicious_zip, "w") as zf:
             zf.writestr("../../evil.txt", "attack payload")
             zf.writestr("normal.c", "int main(){return 0;}")
@@ -64,7 +76,6 @@ class TestCheckerSystem(unittest.TestCase):
         dest = self.test_work / "unsafe_extract"
         extractor = SafeExtractor(self.test_work / "scratch")
         ok, msg, files = extractor.extract_archive(malicious_zip, dest)
-        # 必须拒绝并拦截恶意穿越
         self.assertFalse(ok)
         self.assertIn("Zip Slip", msg)
 
@@ -82,7 +93,6 @@ class TestCheckerSystem(unittest.TestCase):
         compiler = ProjectCompiler()
         build_dir = self.test_work / "build_compat"
 
-        # 包含典型 Windows 专有库与语法
         win_code = """
 #include <stdio.h>
 #include <windows.h>
@@ -90,7 +100,6 @@ class TestCheckerSystem(unittest.TestCase):
 
 int main() {
     int val = 0;
-    // 使用 MSVC 特有的 scanf_s
     scanf_s("%d", &val);
     printf("Received: %d\\n", val * 2);
     fflush(stdin);
@@ -99,14 +108,13 @@ int main() {
 }
 """
         src_path = self.test_work / "win_prog.c"
-        src_path.write_text(win_code, encoding="gbk")  # 以 GBK 编码保存
+        src_path.write_text(win_code, encoding="gbk")
 
         c_res = compiler.compile(src_path, build_dir, "win_compat_test")
         self.assertTrue(c_res.success)
         self.assertTrue(c_res.compat_applied)
         self.assertGreater(len(c_res.compat_reasons), 0)
 
-        # 运行生成的二进制验证逻辑未被篡改
         exec_res = run_binary(c_res.binary_path, input_str="21\n", timeout=2.0)
         self.assertEqual(exec_res.exit_code, 0)
         self.assertIn("Received: 42", exec_res.stdout)
@@ -149,25 +157,24 @@ int main() {
     def test_05_loose_vs_strict_lab1(self):
         """测试 5: Lab 1 确定性与宽松判题（对比正确与错误逻辑）"""
         judge = Lab1Judge()
-        compiler = ProjectCompiler()
         build_dir = self.test_work / "build_lab1_test"
 
-        student = Student(seq=1, student_id="2026110067", name="梁宜")  # x 应为 67
-        # 构造正确的 1-2 源码
-        correct_1_2 = """
+        s1 = self.roster_mgr.students[0]
+        exp_x = int(s1.student_id[-2:])
+
+        correct_1_2 = f"""
 #include <stdio.h>
-int main(void) {
-    short x = 67, y = 88;
+int main(void) {{
+    short x = {exp_x}, y = 88;
     printf("%5hd%5hd%5hd\\n", !x, x||y, x&&y);
     printf("%5hu%5hd%5hd\\n", ~x, x|y, x&y);
     printf("%5hd%5hd%5hd\\n \\n", ~x, x|y, x&y);
     return 0;
-}
+}}
 """
-        p_1_2 = self.test_work / "2026110067_Lab 1-2.c"
+        p_1_2 = self.test_work / f"{s1.student_id}_Lab 1-2.c"
         p_1_2.write_text(correct_1_2)
 
-        # 构造带有中文提示语但计算正确的 1-3 源码
         correct_1_3 = """
 #include <stdio.h>
 int main() {
@@ -186,7 +193,7 @@ int main() {
     return 0;
 }
 """
-        p_1_3 = self.test_work / "2026110067_Lab 1-3.c"
+        p_1_3 = self.test_work / f"{s1.student_id}_Lab 1-3.c"
         p_1_3.write_text(correct_1_3)
 
         files = [
@@ -194,14 +201,13 @@ int main() {
             SubmissionFile(p_1_3, p_1_3.name, "c_source", "1-3"),
         ]
 
-        grade = judge.grade_student(student, files, build_dir, mock_ai=True)
-        # 正确但含中文提示语的应当全部通过
+        grade = judge.grade_student(s1, files, build_dir, mock_ai=True)
         self.assertEqual(grade.problem_results["1-2"].sub_scores["code"], 1.5)
         self.assertEqual(grade.problem_results["1-3"].status, "passed")
         self.assertEqual(grade.problem_results["1-3"].score, 2.0)
         self.assertGreaterEqual(len(grade.comment), 50)
 
-        # 对比：错误逻辑（整型截断除法 5/9）
+        # 错误逻辑：整型截断除法 5/9
         wrong_int_div_1_3 = """
 #include <stdio.h>
 int main() {
@@ -209,7 +215,6 @@ int main() {
     float temp;
     if (scanf("%d %f", &button, &temp) == 2) {
         if (button == 0) {
-            // 典型错误：5/9 为 0
             float c = (5 / 9) * (temp - 32);
             printf("%.2f\\n", c);
         } else {
@@ -224,19 +229,16 @@ int main() {
         p_wrong.write_text(wrong_int_div_1_3)
         files_wrong = [SubmissionFile(p_wrong, p_wrong.name, "c_source", "1-3")]
 
-        grade_wrong = judge.grade_student(student, files_wrong, build_dir, mock_ai=True)
-        # 整型除法导致华氏转摄氏全部得 0，绝不能满分
+        grade_wrong = judge.grade_student(s1, files_wrong, build_dir, mock_ai=True)
         self.assertLess(grade_wrong.problem_results["1-3"].score, 2.0)
-        # 且应当检测到整型截断缺陷
         self.assertTrue(any("截断" in n for n in grade_wrong.problem_results["1-3"].notes))
 
     def test_06_loose_vs_strict_lab2(self):
         """测试 6: Lab 2 宽松问候语匹配、字母金字塔对称性与笔误容错"""
         judge = Lab2Judge()
         build_dir = self.test_work / "build_lab2_test"
-        student = Student(seq=2, student_id="2026110090", name="黄明杨")
+        s2 = self.roster_mgr.students[1] if len(self.roster_mgr.students) > 1 else self.roster_mgr.students[0]
 
-        # 2-1 问候语：中文表达 "早上好" / "下午好" 能够通过
         chinese_greeting_2_1 = """
 #include <stdio.h>
 int main() {
@@ -252,10 +254,9 @@ int main() {
     return 0;
 }
 """
-        p_2_1 = self.test_work / "2026110090_Lab 2-1.c"
+        p_2_1 = self.test_work / f"{s2.student_id}_Lab 2-1.c"
         p_2_1.write_text(chinese_greeting_2_1)
 
-        # 2-2 字母金字塔：正确实现
         pyramid_2_2 = """
 #include <stdio.h>
 #include <ctype.h>
@@ -279,7 +280,7 @@ int main() {
     return 0;
 }
 """
-        p_2_2 = self.test_work / "2026110090_Lab 2-2.c"
+        p_2_2 = self.test_work / f"{s2.student_id}_Lab 2-2.c"
         p_2_2.write_text(pyramid_2_2)
 
         files = [
@@ -287,12 +288,12 @@ int main() {
             SubmissionFile(p_2_2, p_2_2.name, "c_source", "2-2"),
         ]
 
-        grade = judge.grade_student(student, files, build_dir, mock_ai=True)
+        grade = judge.grade_student(s2, files, build_dir, mock_ai=True)
         self.assertEqual(grade.problem_results["2-1"].score, 2.0)
         self.assertEqual(grade.problem_results["2-2"].score, 3.0)
         self.assertEqual(grade.total_score, 5.0)
 
-        # 对比：金字塔逻辑混乱（单向打印未做对称镜像）
+        # 单向未对称镜像
         bad_pyramid = """
 #include <stdio.h>
 int main() {
@@ -306,17 +307,16 @@ int main() {
         p_bad.write_text(bad_pyramid)
         files_bad = [SubmissionFile(p_bad, p_bad.name, "c_source", "2-2")]
 
-        grade_bad = judge.grade_student(student, files_bad, build_dir, mock_ai=True)
-        # 单向未镜像无法通过对称序列校验
+        grade_bad = judge.grade_student(s2, files_bad, build_dir, mock_ai=True)
         self.assertLess(grade_bad.problem_results["2-2"].score, 3.0)
 
     def test_07_ai_review_fallback_on_failure(self):
         """测试 7: AI 调用失败/超时时不误判为 0 分，保留复核标记"""
-        # 测试在非 mock 模式下给出一个不存在的图片路径或调用错误
+        s1 = self.roster_mgr.students[0]
         res = HandwrittenReviewer.review_images(
-            student_id="2026110067",
-            student_name="梁宜",
-            expected_x=67,
+            student_id=s1.student_id,
+            student_name=s1.name,
+            expected_x=int(s1.student_id[-2:]),
             image_paths=[self.test_work / "non_existent.png"],
             mock_mode=False,
         )
@@ -328,22 +328,21 @@ int main() {
         output_dir = self.test_work / "output"
         reporter = LabReporter("lab1", output_dir)
 
-        # 模拟两位学生成绩，其余为未提交
         s1 = self.roster_mgr.students[0]
-        s2 = self.roster_mgr.students[1]
+        s2 = self.roster_mgr.students[1] if len(self.roster_mgr.students) > 1 else s1
 
         g1 = StudentGrade(student=s1, total_score=5.0, status="graded")
-        g1.comment = "梁宜同学你好！本次实验1针对二进制逻辑与C语言基础语法的掌握情况评测完成。按要求将学号末两位对齐参数x，位运算与逻辑运算执行完全正确，演草纸推导规范清晰；Lab 1-3温度转换程序编写规范，成功通过全部双向精度与边界用例测试，表现优秀！望继续保持！"
+        g1.comment = f"{s1.name}同学你好！本次实验1针对二进制逻辑与C语言基础语法的掌握情况评测完成。按要求将学号末两位对齐参数x，位运算与逻辑运算执行完全正确，演草纸推导规范清晰；Lab 1-3温度转换程序编写规范，成功通过全部双向精度与边界用例测试，表现优秀！望继续保持！"
 
         g2 = StudentGrade(student=s2, total_score=3.5, status="graded", needs_review=True, review_reasons=["演草纸字迹待人工核查"])
-        g2.comment = "黄明杨同学你好！本次实验1在Lab 1-2中完成了基础位运算代码，但部分输出结果与推导细节存在偏差，演草纸步骤需更加完备；Lab 1-3温度转换程序编写规范，成功通过测试。希望在后续实验中继续加强代码调试与边界测试意识，扎实掌握基础。"
+        g2.comment = f"{s2.name}同学你好！本次实验1在Lab 1-2中完成了基础位运算代码，但部分输出结果与推导细节存在偏差，演草纸步骤需更加完备；Lab 1-3温度转换程序编写规范，成功通过测试。希望在后续实验中继续加强代码调试与边界测试意识，扎实掌握基础。"
 
         grades = {s1.student_id: g1, s2.student_id: g2}
 
         res_files = reporter.generate_all_reports(
             self.roster_mgr.students,
             grades,
-            excel_template_path=DEFAULT_TEMPLATE_PATH,
+            excel_template_path=DEFAULT_TEMPLATE_PATH if DEFAULT_TEMPLATE_PATH.exists() else None,
         )
 
         detail_csv = res_files["detail_csv"]
@@ -354,18 +353,15 @@ int main() {
         self.assertTrue(summary_md.exists())
         self.assertTrue(roster_csv.exists())
 
-        # 检查成绩单行数是否与点名册完全一致 (表头 1 行 + 92 名学生 = 93 行)
         lines = roster_csv.read_text(encoding="utf-8-sig").splitlines()
         self.assertEqual(len(lines), len(self.roster_mgr.students) + 1)
 
-        # 检查评语长度 >= 50
         self.assertGreaterEqual(len(g1.comment), 50)
         self.assertGreaterEqual(len(g2.comment), 50)
 
-        # 检查总结报告中包含复核清单
         md_text = summary_md.read_text(encoding="utf-8")
         self.assertIn("待人工复核清单", md_text)
-        self.assertIn("2026110090", md_text)
+        self.assertIn(s2.student_id, md_text)
 
 
 if __name__ == "__main__":
