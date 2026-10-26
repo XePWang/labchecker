@@ -1,2 +1,6 @@
 build/
 参考文件/
+.work/
+__pycache__/
+*.py[cod]
+.pytest_cache/
