@@ -1750,5 +1750,221 @@ int main() {
         staged_files = sorted([p.name for p in (lab_dir / "src" / std.student_id).glob("*.c")])
         self.assertEqual(staged_files, ["main.c", "main_alt.c"], "磁盘上严禁存在 main_alt2.c")
 
+    def test_45_lab2_pipeline_archive_grade_csv_export(self):
+        """测试45: [P1] Lab2 全流程 集成测试 (归档 -> 判题 -> CSV/MD导出)
+        验证 Lab2 编码异常样本导出时:
+        1. lab2结果.csv 为 warmup, 2-1, 2-2 分项，无 1-1, 1-2, 1-3
+        2. 编码异常项达成状态为 '待复核', 建议扣分为 '待复核', 是否需要复核为 '是'
+        3. lab2实验成绩单.csv 中 手写材料 为 '不适用 (Lab 2 无手写验算要求)'
+        4. 建议扣分合计为 '待复核'，扣分依据无 Lab1 扣分项，评语针对 Lab2 且 >= 50 字
+        5. 缺交学生正确生成 Lab2 缺交分项 (warmup, 2-1, 2-2, 建议扣分 5.00)
+        """
+        import csv
+        lab_dir = self.test_work / "test_45_lab2"
+        submit_dir = lab_dir / "submit"
+        src_dir = lab_dir / "src"
+        build_dir = lab_dir / "build"
+        output_dir = lab_dir / "output"
+
+        submit_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        std_a = self.roster_mgr.students[0]
+        std_b = self.roster_mgr.students[1] if len(self.roster_mgr.students) > 1 else Student(seq=99, student_id="2026999999", name="测试缺交生", class_id="260101")
+        std_c = Student(seq=100, student_id="2026888888", name="测试全通生", class_id="260101")
+        test_roster = [std_a, std_b, std_c]
+
+        # 1. 模拟 submit 提交
+        code_2_1 = """#include <stdio.h>
+int main() {
+    int h;
+    if (scanf("%d", &h) != 1) {
+        printf("Invalid input!\\n");
+        return 0;
+    }
+    if (h >= 0 && h < 12) printf("Good morning!\\n");
+    else if (h == 12) printf("Good noon!\\n");
+    else if (h >= 13 && h < 18) printf("Good afternoon!\\n");
+    else if (h >= 18 && h < 21) printf("Good evening!\\n");
+    else if (h >= 21 && h < 24) printf("Good night!\\n");
+    else printf("Invalid input!\\n");
+    return 0;
+}
+"""
+        corrupted_2_2_bytes = b"#include <stdio.h>\n/* \xff\xff\xfe\xfe */\nint main(){ printf(\"error\"); return 0; }\n"
+
+        code_2_2_perfect = """#include <stdio.h>
+#include <ctype.h>
+
+int main() {
+    char ch;
+    if (scanf(" %c", &ch) != 1) {
+        printf("ERROR\\n");
+        return 0;
+    }
+    if (!isalpha(ch)) {
+        printf("ERROR: not a letter!\\n");
+        return 0;
+    }
+    ch = toupper(ch);
+    int n = ch - 'A' + 1;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n - i - 1; j++) printf(" ");
+        for (char c = 'A'; c <= 'A' + i; c++) printf("%c", c);
+        for (char c = 'A' + i - 1; c >= 'A'; c--) printf("%c", c);
+        printf("\\n");
+    }
+    return 0;
+}
+"""
+
+        (submit_dir / f"{std_a.student_id}_Lab2-1.c").write_text(code_2_1, encoding="utf-8")
+        (submit_dir / f"{std_a.student_id}_Lab2-2.c").write_bytes(corrupted_2_2_bytes)
+
+        (submit_dir / f"{std_c.student_id}_Lab2-1.c").write_text(code_2_1, encoding="utf-8")
+        (submit_dir / f"{std_c.student_id}_Lab2-2.c").write_text(code_2_2_perfect, encoding="utf-8")
+
+        # 2. 执行 归档 (SubmissionNormalizer)
+        # 为支持 std_c 识别，临时注入点名册
+        self.roster_mgr.students.append(std_c)
+        self.roster_mgr.by_id[std_c.student_id] = std_c
+        self.roster_mgr.by_name.setdefault(std_c.name, []).append(std_c)
+
+        try:
+            normalizer = SubmissionNormalizer(self.roster_mgr, "lab2", lab_dir)
+            normalizer.process_all_submissions()
+            self.assertIn(std_a.student_id, normalizer.student_files)
+            self.assertIn(std_c.student_id, normalizer.student_files)
+            staged_files_a = normalizer.student_files[std_a.student_id]
+            self.assertEqual(len(staged_files_a), 2)
+            bad_sf_2_2 = next(f for f in staged_files_a if f.matched_problem == "2-2")
+            self.assertTrue(bad_sf_2_2.encoding_error)
+
+            # 3. 执行 判题 (Lab2Judge)
+            judge = Lab2Judge()
+            grades = {}
+            for s in test_roster:
+                s_files = normalizer.student_files.get(s.student_id, [])
+                s_build = build_dir / s.student_id
+                s_build.mkdir(parents=True, exist_ok=True)
+                grade = judge.grade_student(s, s_files, s_build, mock_ai=True)
+                grades[s.student_id] = grade
+
+            grade_a = grades[std_a.student_id]
+            grade_b = grades[std_b.student_id]
+            grade_c = grades[std_c.student_id]
+
+            self.assertTrue(grade_a.needs_review)
+            self.assertTrue(grade_a.is_pending)
+            self.assertEqual(grade_a.status, "needs_review")
+            self.assertEqual(grade_b.status, "missing")
+            self.assertEqual(grade_c.status, "graded")
+            self.assertAlmostEqual(grade_c.total_score, 5.00, places=2)
+
+            # 4. 执行 报表导出 (LabReporter)
+            reporter = LabReporter("lab2", output_dir)
+            reports = reporter.generate_all_reports(
+                roster_students=test_roster,
+                grades=grades,
+                encoding_stats=normalizer.encoding_stats,
+            )
+
+            detail_csv_path = reports["detail_csv"]
+            roster_csv_path = reports["roster_csv"]
+            summary_md_path = reports["summary_md"]
+
+            self.assertTrue(detail_csv_path.exists())
+            self.assertTrue(roster_csv_path.exists())
+            self.assertTrue(summary_md_path.exists())
+
+            # 5. 校验 lab2结果.csv
+            with open(detail_csv_path, "r", encoding="utf-8-sig") as f:
+                reader = list(csv.DictReader(f))
+
+            pids = set(r["题号"] for r in reader)
+            self.assertNotIn("1-1", pids, "lab2结果.csv 严禁出现 1-1")
+            self.assertNotIn("1-2", pids, "lab2结果.csv 严禁出现 1-2")
+            self.assertNotIn("1-3", pids, "lab2结果.csv 严禁出现 1-3")
+            self.assertIn("warmup", pids, "lab2结果.csv 需包含 warmup")
+            self.assertIn("2-1", pids, "lab2结果.csv 需包含 2-1")
+            self.assertIn("2-2", pids, "lab2结果.csv 需包含 2-2")
+
+            # 校验 std_a 的 2-2 编码异常分项状态
+            rows_a_2_2 = [r for r in reader if r["学号"] == std_a.student_id and r["题号"] == "2-2"]
+            self.assertGreater(len(rows_a_2_2), 0)
+            for r in rows_a_2_2:
+                self.assertEqual(r["达成状态"], "待复核")
+                self.assertEqual(r["建议扣分"], "待复核")
+                self.assertEqual(r["是否需要复核"], "是")
+
+            # 校验缺交生 std_b 的分项
+            rows_b = [r for r in reader if r["学号"] == std_b.student_id]
+            self.assertEqual(len(rows_b), 10, "缺交生默认应生成 10 个 Lab2 分项")
+            self.assertTrue(all(r["题号"] in {"warmup", "2-1", "2-2"} for r in rows_b))
+            r_b_2_1 = next(r for r in rows_b if r["题号"] == "2-1" and r["评分项"] == "源码提交")
+            self.assertEqual(r_b_2_1["建议扣分"], "2.00")
+            r_b_2_2 = next(r for r in rows_b if r["题号"] == "2-2" and r["评分项"] == "源码提交")
+            self.assertEqual(r_b_2_2["建议扣分"], "3.00")
+
+            # 校验全通生 std_c 的分项
+            rows_c = [r for r in reader if r["学号"] == std_c.student_id]
+            for r in rows_c:
+                if r["题号"] != "warmup":
+                    self.assertEqual(r["达成状态"], "已达成")
+                    self.assertEqual(r["建议扣分"], "0.00")
+                    self.assertEqual(r["是否需要复核"], "否")
+
+            # 6. 校验 lab2实验成绩单.csv
+            with open(roster_csv_path, "r", encoding="utf-8-sig") as f:
+                roster_rows = list(csv.DictReader(f))
+
+            row_a = next(r for r in roster_rows if r["学号"] == std_a.student_id)
+            row_b = next(r for r in roster_rows if r["学号"] == std_b.student_id)
+            row_c = next(r for r in roster_rows if r["学号"] == std_c.student_id)
+
+            # std_a 检查
+            self.assertEqual(row_a["手写材料提交与正确性"], "不适用 (Lab 2 无手写验算要求)")
+            self.assertNotIn("未提交演草纸", row_a["手写材料提交与正确性"])
+            self.assertEqual(row_a["建议扣分合计"], "待复核", "存在编码异常时建议扣分合计应为 '待复核'")
+            self.assertNotIn("1-2", row_a["扣分依据"])
+            self.assertNotIn("1-3", row_a["扣分依据"])
+            self.assertIn("待人工复核", row_a["待复核事项"])
+            self.assertIn("编码损坏", row_a["待复核事项"])
+            self.assertGreaterEqual(len(row_a["实验评语"]), 50)
+            self.assertNotIn("演草纸", row_a["实验评语"])
+            self.assertNotIn("实验1", row_a["实验评语"])
+
+            # std_b 检查
+            self.assertEqual(row_b["手写材料提交与正确性"], "不适用 (Lab 2 无手写验算要求)")
+            self.assertEqual(row_b["建议扣分合计"], "5.00")
+            self.assertIn("warmup:未提交", row_b["各题验收汇总"])
+            self.assertIn("2-1:未提交", row_b["各题验收汇总"])
+            self.assertIn("2-2:未提交", row_b["各题验收汇总"])
+            self.assertNotIn("1-1", row_b["各题验收汇总"])
+            self.assertGreaterEqual(len(row_b["实验评语"]), 50)
+            self.assertIn("LAB2", row_b["实验评语"])
+
+            # std_c 检查
+            self.assertEqual(row_c["手写材料提交与正确性"], "不适用 (Lab 2 无手写验算要求)")
+            self.assertEqual(row_c["建议扣分合计"], "0.00")
+            self.assertEqual(row_c["扣分依据"], "无扣分项")
+            self.assertIn("2-1:(得分2.00/2.00)", row_c["各题验收汇总"])
+            self.assertIn("2-2:(得分3.00/3.00)", row_c["各题验收汇总"])
+            self.assertEqual(row_c["源码提交与正确性"], "2-1与2-2源码均提交且编译通过，全部测试用例正确")
+            self.assertGreaterEqual(len(row_c["实验评语"]), 50)
+
+            # 7. 校验 lab2报告.md
+            md_text = summary_md_path.read_text(encoding="utf-8")
+            self.assertIn("《程序设计思维与实践》LAB2 批量评测报告", md_text)
+            self.assertIn("## 三、 评分细则与说明", md_text)
+            self.assertIn("Lab 2-1 时间段问候 (满分 2.0分)", md_text)
+            self.assertIn("Lab 2-2 字母金字塔 (满分 3.0分)", md_text)
+            self.assertNotIn("Lab 1-2 进制与逻辑", md_text)
+            self.assertIn("核对源码文件编码与原始字符", md_text)
+        finally:
+            if std_c in self.roster_mgr.students:
+                self.roster_mgr.students.remove(std_c)
+            self.roster_mgr.by_id.pop(std_c.student_id, None)
+
 if __name__ == "__main__":
     unittest.main()

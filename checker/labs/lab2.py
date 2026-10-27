@@ -16,6 +16,7 @@ from checker.ai import SemanticAmbiguityReviewer
 from checker.compiler import ProjectCompiler
 from checker.labs.base import BaseLabJudge
 from checker.models import (
+    CheckItem,
     CompileResult,
     CompileTask,
     ProblemResult,
@@ -138,15 +139,28 @@ class Lab2Judge(BaseLabJudge):
         corrupt_archives = [f for f in files if f.file_type == "corrupt_archive"]
 
         # 1. 记录 Warmup 热身情况 (0分)
-        if warmup_files:
-            grade.problem_results["warmup"] = ProblemResult(
+        warmup_prob = ProblemResult(
+            problem_id="warmup",
+            score=0.0,
+            max_score=0.0,
+            status="passed" if warmup_files else "missing",
+            notes=[f"已提交热身练习文件 ({len(warmup_files)}个)，依课程规则不计入实验总分"] if warmup_files else ["未提交课前热身练习文件"],
+            source_files=warmup_files,
+        )
+        warmup_prob.check_items = [
+            CheckItem(
                 problem_id="warmup",
-                score=0.0,
-                max_score=0.0,
-                status="passed",
-                notes=[f"已提交热身练习文件 ({len(warmup_files)}个)，依课程规则不计入实验总分"],
-                source_files=warmup_files,
+                sub_item="课前热身练习",
+                submission_status="已提交" if warmup_files else "未提交",
+                completion_status="不适用",
+                evidence=f"已归档热身练习文件: {[f.name for f in warmup_files]}" if warmup_files else "未提交课前热身练习文件",
+                deduction=0.0,
+                deduction_reason="热身练习依规则不计入总分",
+                agent_note="不作强制提交要求，不计分亦不扣分",
+                needs_review=False,
             )
+        ]
+        grade.problem_results["warmup"] = warmup_prob
 
         # 2. 评测 Lab 2-1 (2.0分)
         res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives, all_files=files)
@@ -209,11 +223,24 @@ class Lab2Judge(BaseLabJudge):
             if corrupt_archives:
                 prob.status = "needs_review"
                 prob.needs_review = True
+                prob.is_pending = True
                 prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
                 prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-1 源码无法验证")
+                prob.check_items = [
+                    CheckItem("2-1", "源码提交", "已提交", "待复核", f"已提交压缩包 {corrupt_archives[0].original_name} 但解压失败", None, f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-1 源码无法验证", "解压失败、内容无法验证、待复核", True),
+                    CheckItem("2-1", "编译与运行", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "时间段问候逻辑", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "边界与无效输入处理", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                ]
             else:
                 prob.status = "missing"
                 prob.notes.append("未提交 Lab 2-1 源码")
+                prob.check_items = [
+                    CheckItem("2-1", "源码提交", "未提交", "未达成", "未检索到 Lab 2-1 源码文件", 2.00, "未提交 Lab 2-1 源码文件", "缺少源码", False),
+                    CheckItem("2-1", "编译与运行", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "时间段问候逻辑", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "边界与无效输入处理", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                ]
             return prob
 
         total_cases = len(self.lab2_1_cases)
@@ -349,6 +376,165 @@ class Lab2Judge(BaseLabJudge):
         if best_eval["is_pending"]:
             prob.is_pending = True
 
+        best_sf = next((f for f in (all_files or []) if f.path == src_path), None)
+        is_enc_err = bool(best_sf and best_sf.encoding_error)
+
+        # 构建结构化检查分项 (CheckItems: 4 个分项)
+        items: List[CheckItem] = []
+        if is_enc_err:
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="待复核",
+                evidence=f"提交源码文件: {src_path.name} (编码损坏: {best_sf.encoding_error})",
+                deduction=None,
+                deduction_reason=f"源码编码损坏无法严格解码: {best_sf.encoding_error}，待人工复核",
+                agent_note="源码编码损坏，待人工复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="待复核",
+                evidence=f"源码编码异常导致编译无法正常判定: {best_sf.encoding_error}",
+                deduction=None,
+                deduction_reason="源码存在编码损坏无法可靠编译，待人工复核",
+                agent_note="编码损坏待复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="时间段问候逻辑",
+                submission_status="不适用",
+                completion_status="待复核",
+                evidence="源码编码损坏，时间段逻辑待复核",
+                deduction=None,
+                deduction_reason="源码编码损坏待人工复核",
+                agent_note="待复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="边界与无效输入处理",
+                submission_status="不适用",
+                completion_status="待复核",
+                evidence="源码编码损坏，边界处理待复核",
+                deduction=None,
+                deduction_reason="源码编码损坏待人工复核",
+                agent_note="待复核",
+                needs_review=True,
+            ))
+        elif not c_res.success:
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=f"提交源码文件: {src_path.name}",
+                deduction=0.0,
+                deduction_reason="",
+                agent_note="源码归档正常",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="未达成",
+                evidence=f"GCC 编译失败: {c_res.stderr[:100]}",
+                deduction=2.00,
+                deduction_reason=f"Lab 2-1 编译失败: {c_res.stderr[:100]}",
+                agent_note="编译语法错误",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="时间段问候逻辑",
+                submission_status="不适用",
+                completion_status="无法验证",
+                evidence="源码未成功编译",
+                deduction=0.0,
+                deduction_reason="未成功编译，本项无法验证，不重复扣分",
+                agent_note="无法验证",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="边界与无效输入处理",
+                submission_status="不适用",
+                completion_status="无法验证",
+                evidence="源码未成功编译",
+                deduction=0.0,
+                deduction_reason="未成功编译，本项无法验证，不重复扣分",
+                agent_note="无法验证",
+                needs_review=False,
+            ))
+        else:
+            enc_note = f" (已自 {best_sf.source_encoding} 规范化为 UTF-8)" if (best_sf and best_sf.encoding_converted) else ""
+            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
+            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {best_sf.source_encoding})" if (best_sf and best_sf.encoding_converted) else "源码归档正常")
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=ev_str,
+                deduction=0.0,
+                deduction_reason="",
+                agent_note=an_str,
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=f"GCC 编译成功 ({c_res.duration_ms:.1f}ms)，测试用例可正常执行",
+                deduction=0.0,
+                deduction_reason="",
+                agent_note="编译运行通过",
+                needs_review=False,
+            ))
+
+            valid_test_res = best_eval["test_results"][:10]
+            valid_passed = sum(1 for c in valid_test_res if c.passed)
+            valid_ded = round(1.50 * (1 - valid_passed / 10), 2)
+            has_pending = any(c.needs_review for c in valid_test_res)
+            v_status = "已达成" if valid_ded == 0 else ("部分达成" if valid_passed > 0 else "未达成")
+            if has_pending:
+                v_status = "待复核"
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="时间段问候逻辑",
+                submission_status="已提交",
+                completion_status=v_status,
+                evidence=f"通过有效时间段问候测试 {valid_passed}/10 项 (Morning/Noon/Afternoon/Evening/Night)",
+                deduction=None if has_pending else valid_ded,
+                deduction_reason=f"部分时间段问候未通过测试 (-{valid_ded:.2f}分)" if (valid_ded > 0 and not has_pending) else ("语义复核待定" if has_pending else ""),
+                agent_note="经语义复核待定" if has_pending else ("问候逻辑正确" if valid_ded == 0 else "部分时段匹配有偏差"),
+                needs_review=has_pending,
+            ))
+
+            invalid_test_res = best_eval["test_results"][10:12]
+            invalid_passed = sum(1 for c in invalid_test_res if c.passed)
+            inv_ded = round(0.50 * (1 - invalid_passed / 2), 2)
+            inv_status = "已达成" if inv_ded == 0 else ("部分达成" if invalid_passed > 0 else "未达成")
+            items.append(CheckItem(
+                problem_id="2-1",
+                sub_item="边界与无效输入处理",
+                submission_status="已提交",
+                completion_status=inv_status,
+                evidence=f"通过非法输入过滤测试 {invalid_passed}/2 项 (包含 -1 与 24)",
+                deduction=inv_ded,
+                deduction_reason=f"非法输入 (-1, 24) 未正确报错或识别 (-{inv_ded:.2f}分)" if inv_ded > 0 else "",
+                agent_note="边界与非法输入处理正常" if inv_ded == 0 else "非法输入未完全过滤",
+                needs_review=False,
+            ))
+
+        prob.check_items = items
+
         if not c_res.success:
             prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
             prob.notes.append("Lab 2-1 编译失败")
@@ -391,11 +577,26 @@ class Lab2Judge(BaseLabJudge):
             if corrupt_archives:
                 prob.status = "needs_review"
                 prob.needs_review = True
+                prob.is_pending = True
                 prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
                 prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-2 源码无法验证")
+                prob.check_items = [
+                    CheckItem("2-2", "源码提交", "已提交", "待复核", f"已提交压缩包 {corrupt_archives[0].original_name} 但解压失败", None, f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-2 源码无法验证", "解压失败、内容无法验证、待复核", True),
+                    CheckItem("2-2", "编译与运行", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "大小写字母兼容转换", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "非字母与异常输入报错", "不适用", "无法验证", "压缩包损坏无法提取源码", 0.0, "未成功提取源码，本项无法验证，不重复扣分", "无法验证", False),
+                ]
             else:
                 prob.status = "missing"
                 prob.notes.append("未提交 Lab 2-2 源码")
+                prob.check_items = [
+                    CheckItem("2-2", "源码提交", "未提交", "未达成", "未检索到 Lab 2-2 源码文件", 3.00, "未提交 Lab 2-2 源码文件", "缺少源码", False),
+                    CheckItem("2-2", "编译与运行", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "大小写字母兼容转换", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "非字母与异常输入报错", "不适用", "无法验证", "未提交源码", 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                ]
             return prob
 
         # 测试用例: [(输入字符, 期望总行数, 最终行对称序列, 是否非字母测试)]
@@ -552,6 +753,198 @@ class Lab2Judge(BaseLabJudge):
         if best_eval.get("is_pending"):
             prob.is_pending = True
 
+        best_sf = next((f for f in (all_files or []) if f.path == src_path), None)
+        is_enc_err = bool(best_sf and best_sf.encoding_error)
+
+        # 构建结构化检查分项 (CheckItems: 5 个分项)
+        items: List[CheckItem] = []
+        if is_enc_err:
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="待复核",
+                evidence=f"提交源码文件: {src_path.name} (编码损坏: {best_sf.encoding_error})",
+                deduction=None,
+                deduction_reason=f"源码编码损坏无法严格解码: {best_sf.encoding_error}，待人工复核",
+                agent_note="源码编码损坏，待人工复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="待复核",
+                evidence=f"源码编码异常导致编译无法正常判定: {best_sf.encoding_error}",
+                deduction=None,
+                deduction_reason="源码存在编码损坏无法可靠编译，待人工复核",
+                agent_note="编码损坏待复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="字母对称金字塔展开 (A~Z)",
+                submission_status="不适用",
+                completion_status="待复核",
+                evidence="源码编码损坏，金字塔构造待复核",
+                deduction=None,
+                deduction_reason="源码编码损坏待人工复核",
+                agent_note="待复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="大小写字母兼容转换",
+                submission_status="不适用",
+                completion_status="待复核",
+                evidence="源码编码损坏，大小写转换待复核",
+                deduction=None,
+                deduction_reason="源码编码损坏待人工复核",
+                agent_note="待复核",
+                needs_review=True,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="非字母与异常输入报错",
+                submission_status="不适用",
+                completion_status="待复核",
+                evidence="源码编码损坏，异常输入处理待复核",
+                deduction=None,
+                deduction_reason="源码编码损坏待人工复核",
+                agent_note="待复核",
+                needs_review=True,
+            ))
+        elif not c_res.success:
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=f"提交源码文件: {src_path.name}",
+                deduction=0.0,
+                deduction_reason="",
+                agent_note="源码归档正常",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="未达成",
+                evidence=f"GCC 编译失败: {c_res.stderr[:100]}",
+                deduction=3.00,
+                deduction_reason=f"Lab 2-2 编译失败: {c_res.stderr[:100]}",
+                agent_note="编译语法错误",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="字母对称金字塔展开 (A~Z)",
+                submission_status="不适用",
+                completion_status="无法验证",
+                evidence="源码未成功编译",
+                deduction=0.0,
+                deduction_reason="未成功编译，本项无法验证，不重复扣分",
+                agent_note="无法验证",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="大小写字母兼容转换",
+                submission_status="不适用",
+                completion_status="无法验证",
+                evidence="源码未成功编译",
+                deduction=0.0,
+                deduction_reason="未成功编译，本项无法验证，不重复扣分",
+                agent_note="无法验证",
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="非字母与异常输入报错",
+                submission_status="不适用",
+                completion_status="无法验证",
+                evidence="源码未成功编译",
+                deduction=0.0,
+                deduction_reason="未成功编译，本项无法验证，不重复扣分",
+                agent_note="无法验证",
+                needs_review=False,
+            ))
+        else:
+            enc_note = f" (已自 {best_sf.source_encoding} 规范化为 UTF-8)" if (best_sf and best_sf.encoding_converted) else ""
+            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
+            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {best_sf.source_encoding})" if (best_sf and best_sf.encoding_converted) else "源码归档正常")
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=ev_str,
+                deduction=0.0,
+                deduction_reason="",
+                agent_note=an_str,
+                needs_review=False,
+            ))
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="编译与运行",
+                submission_status="已提交",
+                completion_status="已达成",
+                evidence=f"GCC 编译成功 ({c_res.duration_ms:.1f}ms)，测试用例可正常执行",
+                deduction=0.0,
+                deduction_reason="",
+                agent_note="编译运行通过",
+                needs_review=False,
+            ))
+
+            pyr_cases = [best_eval["test_results"][0], best_eval["test_results"][2], best_eval["test_results"][5]]
+            passed_pyr = sum(1 for c in pyr_cases if c.passed)
+            ded_pyr = round(2.00 * (1 - passed_pyr / 3), 2)
+            pyr_status = "已达成" if ded_pyr == 0 else ("部分达成" if passed_pyr > 0 else "未达成")
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="字母对称金字塔展开 (A~Z)",
+                submission_status="已提交",
+                completion_status=pyr_status,
+                evidence=f"通过对称金字塔展开测试 {passed_pyr}/3 项 (输入 C, A, Z)",
+                deduction=ded_pyr,
+                deduction_reason=f"字母对称金字塔展开序列不完整或未严格对称 (-{ded_pyr:.2f}分)" if ded_pyr > 0 else "",
+                agent_note="金字塔对称展开正确" if ded_pyr == 0 else "对称展开存在偏差",
+                needs_review=False,
+            ))
+
+            case_f = best_eval["test_results"][1]
+            ded_f = 0.0 if case_f.passed else 0.50
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="大小写字母兼容转换",
+                submission_status="已提交",
+                completion_status="已达成" if case_f.passed else "未达成",
+                evidence="小写字母 'f' 成功自动提升并正确生成 6 层金字塔" if case_f.passed else "小写字母未能正确转换为对应大写金字塔",
+                deduction=ded_f,
+                deduction_reason="小写字母未做自动提升转换 (-0.50分)" if ded_f > 0 else "",
+                agent_note="大小写兼容转换正常" if ded_f == 0 else "小写字母未转换",
+                needs_review=False,
+            ))
+
+            err_cases = [best_eval["test_results"][3], best_eval["test_results"][4]]
+            passed_err = sum(1 for c in err_cases if c.passed)
+            ded_err = round(0.50 * (1 - passed_err / 2), 2)
+            err_status = "已达成" if ded_err == 0 else ("部分达成" if passed_err > 0 else "未达成")
+            items.append(CheckItem(
+                problem_id="2-2",
+                sub_item="非字母与异常输入报错",
+                submission_status="已提交",
+                completion_status=err_status,
+                evidence=f"通过非字母异常输入报错测试 {passed_err}/2 项 (输入 '-' 与 '1')",
+                deduction=ded_err,
+                deduction_reason=f"非字母与数字输入未按指导书要求报错提示 (-{ded_err:.2f}分)" if ded_err > 0 else "",
+                agent_note="非字母错误处理正常" if ded_err == 0 else "非字母输入未报错",
+                needs_review=False,
+            ))
+
+        prob.check_items = items
+
         if not c_res.success:
             prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
             prob.notes.append("Lab 2-2 编译失败")
@@ -651,7 +1044,7 @@ class Lab2Judge(BaseLabJudge):
         student = grade.student
         r2_1 = grade.problem_results.get("2-1")
         r2_2 = grade.problem_results.get("2-2")
-        has_warmup = "warmup" in grade.problem_results
+        has_warmup = bool(grade.problem_results.get("warmup") and grade.problem_results["warmup"].source_files)
         has_optional = bool(grade.optional_results)
 
         parts = [f"{student.name}同学你好！本次实验2重点考核分支判断、循环嵌套与字符处理逻辑。"]
@@ -674,6 +1067,8 @@ class Lab2Judge(BaseLabJudge):
                 parts.append("Lab 2-1基本实现了时间分支，但在边界条件或非法值判断上存在疏漏，需细化if分支；")
             elif r2_1.status == "compile_error":
                 parts.append("Lab 2-1程序编译异常，请注意检查基础语法与变量定义；")
+            elif r2_1.status == "needs_review":
+                parts.append("Lab 2-1时间问候程序已提交但存在待复核事项，系统已保留记录待人工核验；")
             else:
                 parts.append("Lab 2-1未能通过基础问候语测试，请强化条件分支训练；")
 
@@ -685,6 +1080,8 @@ class Lab2Judge(BaseLabJudge):
                 parts.append("Lab 2-2生成了字母金字塔，但在大小写转换或非字母错误处理上尚有优化空间。")
             elif r2_2.status == "compile_error":
                 parts.append("Lab 2-2未能编译成功，建议在本地集成环境中单步调试循环。")
+            elif r2_2.status == "needs_review":
+                parts.append("Lab 2-2字母金字塔程序已提交但存在编码异常或待复核事项，系统已保留记录待人工核验；")
             else:
                 parts.append("Lab 2-2字符循环逻辑有误，需深入理解嵌套循环索引变量的变化规律。")
 

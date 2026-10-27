@@ -349,6 +349,14 @@ class SubmissionNormalizer:
         self.converted_encoding_count: int = 0
         self.unknown_encoding_files: List[Dict[str, str]] = []
 
+    @property
+    def encoding_stats(self) -> Dict[str, Any]:
+        """源码编码识别与转码统计"""
+        return {
+            "converted_count": self.converted_encoding_count,
+            "unknown_count": len(self.unknown_encoding_files),
+        }
+
     def _is_container_dir(self, d: Path) -> bool:
         """检查目录是否为包裹了学生提交的容器目录"""
         if d.name in IGNORED_PATTERNS or d.name.startswith("."):

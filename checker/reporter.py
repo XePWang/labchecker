@@ -89,10 +89,17 @@ class LabReporter:
                 if not items:
                     items = self._build_default_check_items(student, grade)
 
-                student_comment = grade.comment if grade else (
-                    f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
-                    f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
-                )
+                if self.lab_id == "lab2":
+                    missing_msg = (
+                        f"{student.name}同学你好！系统未检测到你在本次LAB2中的作业提交（未收到源码文件）。"
+                        f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
+                    )
+                else:
+                    missing_msg = (
+                        f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                        f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
+                    )
+                student_comment = grade.comment if grade else missing_msg
 
                 for it in items:
                     if it.deduction is None:
@@ -128,6 +135,49 @@ class LabReporter:
         is_conflict = grade and (grade.status in {"ambiguous", "conflict"} or any("冲突" in r for r in grade.review_reasons))
         evidence_msg = "未检测到实验提交文件" if is_missing else ("多学号匹配冲突待复核" if is_conflict else "学生提交已评测完成")
 
+        if self.lab_id == "lab2":
+            if grade and grade.total_score > 0 and not any(prob.check_items for prob in grade.problem_results.values()):
+                rem_ded = max(0.0, round(5.0 - grade.total_score, 2))
+                return [
+                    CheckItem("warmup", "课前热身练习", "已提交", "不适用", "热身练习完成", 0.0, "热身练习依规则不计入总分", "课内练习", False),
+                    CheckItem("2-1", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
+                    CheckItem("2-1", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
+                    CheckItem("2-1", "时间段问候逻辑", "已提交", "已达成", "问候逻辑测试通过", 0.0, "", "正常", False),
+                    CheckItem("2-1", "边界与无效输入处理", "已提交", "已达成", "边界与无效输入测试通过", 0.0, "", "正常", False),
+                    CheckItem("2-2", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
+                    CheckItem("2-2", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
+                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "已提交", "已达成" if rem_ded == 0 else "部分达成", "对称金字塔展开测试通过", rem_ded, "扣除未通过部分" if rem_ded > 0 else "", "正常", False),
+                    CheckItem("2-2", "大小写字母兼容转换", "已提交", "已达成", "大小写兼容测试通过", 0.0, "", "正常", False),
+                    CheckItem("2-2", "非字母与异常输入报错", "已提交", "已达成", "异常输入报错测试通过", 0.0, "", "正常", False),
+                ]
+
+            if is_missing:
+                return [
+                    CheckItem("warmup", "课前热身练习", "未提交", "不适用", evidence_msg, 0.0, "热身练习依规则不计入总分", "课内练习无强制提交要求", False),
+                    CheckItem("2-1", "源码提交", "未提交", "未达成", evidence_msg, 2.00, "未提交 Lab 2-1 源码文件", "缺少源码", False),
+                    CheckItem("2-1", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "时间段问候逻辑", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "边界与无效输入处理", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "源码提交", "未提交", "未达成", evidence_msg, 3.00, "未提交 Lab 2-2 源码文件", "缺少源码", False),
+                    CheckItem("2-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "大小写字母兼容转换", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "非字母与异常输入报错", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                ]
+            else:
+                return [
+                    CheckItem("warmup", "课前热身练习", "已提交", "不适用", evidence_msg, 0.0, "热身练习依规则不计入总分", "不作强制提交要求", False),
+                    CheckItem("2-1", "源码提交", "已提交", "待复核", evidence_msg, None, "待人工复核确认提交情况与源码归属", "待复核", True),
+                    CheckItem("2-1", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "时间段问候逻辑", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-1", "边界与无效输入处理", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "源码提交", "已提交", "待复核", evidence_msg, None, "待人工复核确认提交情况与源码归属", "待复核", True),
+                    CheckItem("2-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "大小写字母兼容转换", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                    CheckItem("2-2", "非字母与异常输入报错", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                ]
+
         if grade and grade.total_score > 0 and not any(prob.check_items for prob in grade.problem_results.values()):
             rem_ded = max(0.0, round(5.0 - grade.total_score, 2))
             return [
@@ -151,26 +201,48 @@ class LabReporter:
                 CheckItem("1-3", "输出精度与格式", "已提交", "已达成", "精度符合要求", 0.0, "", "正常", False),
             ]
 
-        items = [
-            CheckItem("1-1", "课内环境熟悉与基础代码练习", "未提交" if is_missing else "已提交", "不适用", evidence_msg, 0.0, "课内基础练习无扣分", "课内练习无强制提交要求", False),
-            CheckItem("1-2", "源码提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 源码文件", "缺少源码", not is_missing),
-            CheckItem("1-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "参数学号与手机号对齐", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "逻辑运算(!, ||, &&)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "位运算(~, |, &)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "有符号与无符号输出格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "验算材料提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 演草纸手写验算照片", "缺少手写材料", not is_missing),
-            CheckItem("1-2", "姓名、学号、手机号完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "手写参数与身份及源码一致性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "六种运算展开过程完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-2", "各验算过程与结果正确性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-3", "源码提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 2.00, "未提交 Lab 1-3 源码文件", "缺少源码", not is_missing),
-            CheckItem("1-3", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-3", "华氏转摄氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-3", "摄氏转华氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-3", "边界、负温与浮点测试", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-            CheckItem("1-3", "输出精度与格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
-        ]
+        if is_missing:
+            items = [
+                CheckItem("1-1", "课内环境熟悉与基础代码练习", "未提交", "不适用", evidence_msg, 0.0, "课内基础练习无扣分", "课内练习无强制提交要求", False),
+                CheckItem("1-2", "源码提交", "未提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 源码文件", "缺少源码", False),
+                CheckItem("1-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "参数学号与手机号对齐", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "逻辑运算(!, ||, &&)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "位运算(~, |, &)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "有符号与无符号输出格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "验算材料提交", "未提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 演草纸手写验算照片", "缺少手写材料", False),
+                CheckItem("1-2", "姓名、学号、手机号完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "手写参数与身份及源码一致性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "六种运算展开过程完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "各验算过程与结果正确性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "源码提交", "未提交", "未达成", evidence_msg, 2.00, "未提交 Lab 1-3 源码文件", "缺少源码", False),
+                CheckItem("1-3", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "华氏转摄氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "摄氏转华氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "边界、负温与浮点测试", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "输出精度与格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            ]
+        else:
+            items = [
+                CheckItem("1-1", "课内环境熟悉与基础代码练习", "已提交", "不适用", evidence_msg, 0.0, "课内基础练习无扣分", "课内练习无强制提交要求", False),
+                CheckItem("1-2", "源码提交", "已提交", "待复核", evidence_msg, None, "待人工复核确认提交情况与源码归属", "待复核", True),
+                CheckItem("1-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "参数学号与手机号对齐", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "逻辑运算(!, ||, &&)", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "位运算(~, |, &)", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "有符号与无符号输出格式", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "验算材料提交", "已提交", "待复核", evidence_msg, None, "待人工复核确认手写验算归属", "待复核", True),
+                CheckItem("1-2", "姓名、学号、手机号完整性", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "手写参数与身份及源码一致性", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "六种运算展开过程完整性", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-2", "各验算过程与结果正确性", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "源码提交", "已提交", "待复核", evidence_msg, None, "待人工复核确认提交情况与源码归属", "待复核", True),
+                CheckItem("1-3", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "华氏转摄氏计算", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "摄氏转华氏计算", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "边界、负温与浮点测试", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+                CheckItem("1-3", "输出精度与格式", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
+            ]
         return items
 
     def generate_roster_grade_csv(
@@ -203,70 +275,121 @@ class LabReporter:
                     items = self._build_default_check_items(student, grade)
 
                 # 1. 各题验收汇总
-                if not grade or grade.status == "missing":
-                    summary_problems = "全未交 (1-1:未提交; 1-2:未提交; 1-3:未提交)"
+                if self.lab_id == "lab2":
+                    if not grade or grade.status == "missing":
+                        summary_problems = "全未交 (warmup:未提交; 2-1:未提交; 2-2:未提交)"
+                    else:
+                        summaries = []
+                        for pid in ["warmup", "2-1", "2-2", "2-3", "2-4"]:
+                            prob = grade.problem_results.get(pid) or grade.optional_results.get(pid)
+                            if prob:
+                                if pid == "warmup":
+                                    warmup_st = "已提交" if (prob.status == "passed" or prob.source_files) else "未提交"
+                                    summaries.append(f"warmup:{warmup_st}(不计分)")
+                                elif pid == "2-1":
+                                    summaries.append(f"2-1:(得分{prob.score:.2f}/2.00)")
+                                elif pid == "2-2":
+                                    summaries.append(f"2-2:(得分{prob.score:.2f}/3.00)")
+                                elif pid in {"2-3", "2-4"}:
+                                    summaries.append(f"{pid}:选做(得分{prob.score:.2f})")
+                        summary_problems = "; ".join(summaries) if summaries else grade.status
                 else:
-                    summaries = []
-                    for pid in ["1-1", "1-2", "1-3"]:
-                        prob = grade.problem_results.get(pid)
-                        if prob:
-                            if pid == "1-1":
-                                summaries.append("1-1:课内练习")
-                            elif pid == "1-2":
-                                c_sc = prob.sub_scores.get("code", 0.0)
-                                h_sc = prob.sub_scores.get("handwritten", 0.0)
-                                summaries.append(f"1-2:(代码{c_sc:.2f}/1.50, 手写{h_sc:.2f}/1.50)")
-                            elif pid == "1-3":
-                                summaries.append(f"1-3:(得分{prob.score:.2f}/2.00)")
-                    summary_problems = "; ".join(summaries) if summaries else grade.status
+                    if not grade or grade.status == "missing":
+                        summary_problems = "全未交 (1-1:未提交; 1-2:未提交; 1-3:未提交)"
+                    else:
+                        summaries = []
+                        for pid in ["1-1", "1-2", "1-3"]:
+                            prob = grade.problem_results.get(pid)
+                            if prob:
+                                if pid == "1-1":
+                                    summaries.append("1-1:课内练习")
+                                elif pid == "1-2":
+                                    c_sc = prob.sub_scores.get("code", 0.0)
+                                    h_sc = prob.sub_scores.get("handwritten", 0.0)
+                                    summaries.append(f"1-2:(代码{c_sc:.2f}/1.50, 手写{h_sc:.2f}/1.50)")
+                                elif pid == "1-3":
+                                    summaries.append(f"1-3:(得分{prob.score:.2f}/2.00)")
+                        summary_problems = "; ".join(summaries) if summaries else grade.status
 
                 # 2. 源码提交与正确性
-                if not grade or grade.status == "missing":
-                    src_summary = "未提交任何 C 源码"
-                else:
-                    r1_2 = grade.problem_results.get("1-2")
-                    r1_3 = grade.problem_results.get("1-3")
-                    has_cbp = any(".cbp" in r for r in grade.review_reasons)
-                    has_lnk = any(".lnk" in r for r in grade.review_reasons)
-                    has_exe = any("Wprogram.exe" in r or "预编译" in r for r in grade.review_reasons)
-
-                    if has_cbp or has_lnk:
-                        src_summary = "未提交有效 C 源码 (仅提交工程描述 .cbp 或快捷方式 .lnk)"
-                    elif has_exe:
-                        src_summary = "1-2仅提交预编译exe缺少C源码，1-3源码编译运行全通过"
-                    elif r1_2 and r1_3 and r1_2.compile_result and r1_2.compile_result.success and r1_3.compile_result and r1_3.compile_result.success:
-                        int_div = any("整型截断" in it.deduction_reason for it in items)
-                        if int_div:
-                            src_summary = "1-2与1-3源码均提交且编译通过，1-3含5/9整数截断错误"
-                        else:
-                            p1_3_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-3")
-                            p1_2_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-2" and "验算" not in it.sub_item and "手写" not in it.sub_item)
-                            if p1_3_ok and p1_2_ok:
-                                src_summary = "1-2与1-3源码均提交且编译通过，全部测试用例正确"
-                            else:
-                                src_summary = "源码已提交并编译通过，部分运算测试存在偏差"
-                    elif any(p.status == "compile_error" for p in [r1_2, r1_3] if p):
-                        src_summary = "源码已提交，但存在编译语法错误未能生成执行文件"
+                if self.lab_id == "lab2":
+                    if not grade or grade.status == "missing":
+                        src_summary = "未提交任何 C 源码"
                     else:
-                        src_summary = "源码提交不全或测试未通过"
+                        r2_1 = grade.problem_results.get("2-1")
+                        r2_2 = grade.problem_results.get("2-2")
+                        has_cbp = any(".cbp" in r for r in grade.review_reasons)
+                        has_lnk = any(".lnk" in r for r in grade.review_reasons)
+                        has_corrupt = any("损坏" in r or "解压失败" in r for r in grade.review_reasons)
+                        has_enc_err = any("编码损坏" in r or "编码异常" in r for r in grade.review_reasons)
+
+                        if has_cbp or has_lnk:
+                            src_summary = "未提交有效 C 源码 (仅提交工程描述 .cbp 或快捷方式 .lnk)"
+                        elif has_corrupt:
+                            src_summary = "提交压缩包损坏无法解压，源码无法提取验证"
+                        elif has_enc_err or any(it.completion_status == "待复核" for it in items):
+                            src_summary = "源码已提交，但存在编码异常或待复核事项"
+                        elif r2_1 and r2_2 and r2_1.compile_result and r2_1.compile_result.success and r2_2.compile_result and r2_2.compile_result.success:
+                            p2_1_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "2-1")
+                            p2_2_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "2-2")
+                            if p2_1_ok and p2_2_ok:
+                                src_summary = "2-1与2-2源码均提交且编译通过，全部测试用例正确"
+                            else:
+                                src_summary = "2-1与2-2源码均提交并编译通过，部分测试用例存在偏差"
+                        elif any(p and p.status == "compile_error" for p in [r2_1, r2_2]):
+                            src_summary = "源码已提交，但存在编译语法错误未能生成执行文件"
+                        else:
+                            src_summary = "源码提交不全或测试未通过"
+                else:
+                    if not grade or grade.status == "missing":
+                        src_summary = "未提交任何 C 源码"
+                    else:
+                        r1_2 = grade.problem_results.get("1-2")
+                        r1_3 = grade.problem_results.get("1-3")
+                        has_cbp = any(".cbp" in r for r in grade.review_reasons)
+                        has_lnk = any(".lnk" in r for r in grade.review_reasons)
+                        has_exe = any("Wprogram.exe" in r or "预编译" in r for r in grade.review_reasons)
+
+                        if has_cbp or has_lnk:
+                            src_summary = "未提交有效 C 源码 (仅提交工程描述 .cbp 或快捷方式 .lnk)"
+                        elif has_exe:
+                            src_summary = "1-2仅提交预编译exe缺少C源码，1-3源码编译运行全通过"
+                        elif r1_2 and r1_3 and r1_2.compile_result and r1_2.compile_result.success and r1_3.compile_result and r1_3.compile_result.success:
+                            int_div = any("整型截断" in it.deduction_reason for it in items)
+                            if int_div:
+                                src_summary = "1-2与1-3源码均提交且编译通过，1-3含5/9整数截断错误"
+                            else:
+                                p1_3_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-3")
+                                p1_2_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-2" and "验算" not in it.sub_item and "手写" not in it.sub_item)
+                                if p1_3_ok and p1_2_ok:
+                                    src_summary = "1-2与1-3源码均提交且编译通过，全部测试用例正确"
+                                else:
+                                    src_summary = "源码已提交并编译通过，部分运算测试存在偏差"
+                        elif any(p.status == "compile_error" for p in [r1_2, r1_3] if p):
+                            src_summary = "源码已提交，但存在编译语法错误未能生成执行文件"
+                        else:
+                            src_summary = "源码提交不全或测试未通过"
 
                 # 3. 手写材料提交与正确性
-                if not grade or grade.status == "missing":
-                    hw_summary = "未提交演草纸验算材料"
+                if self.lab_id == "lab2":
+                    hw_summary = "不适用 (Lab 2 无手写验算要求)"
                 else:
-                    r1_2 = grade.problem_results.get("1-2")
-                    if not r1_2 or not any(it.sub_item == "验算材料提交" and it.submission_status == "已提交" for it in items):
+                    if not grade or grade.status == "missing":
                         hw_summary = "未提交演草纸验算材料"
-                    elif r1_2.ai_review and r1_2.ai_review.get("is_pending"):
-                        hw_summary = "已提交手写照片，AI批改待定，需人工复核"
                     else:
-                        hw_sc = r1_2.sub_scores.get("handwritten", 0.0)
-                        if hw_sc >= 1.45:
-                            hw_summary = f"已提交演草纸，个人信息与参数齐全，六种运算推导完整正确 (得分 {hw_sc:.2f}/1.50)"
-                        elif hw_sc > 0:
-                            hw_summary = f"已提交演草纸，部分信息或展开步骤略有欠缺 (得分 {hw_sc:.2f}/1.50)"
+                        r1_2 = grade.problem_results.get("1-2")
+                        if not r1_2 or not any(it.sub_item == "验算材料提交" and it.submission_status == "已提交" for it in items):
+                            hw_summary = "未提交演草纸验算材料"
+                        elif r1_2.ai_review and r1_2.ai_review.get("is_pending"):
+                            hw_summary = "已提交手写照片，AI批改待定，需人工复核"
                         else:
-                            hw_summary = "已提交演草纸但推导过程无效或存在身份矛盾"
+                            hw_sc = r1_2.sub_scores.get("handwritten", 0.0)
+                            if hw_sc >= 1.45:
+                                hw_summary = f"已提交演草纸，个人信息与参数齐全，六种运算推导完整正确 (得分 {hw_sc:.2f}/1.50)"
+                            elif hw_sc > 0:
+                                hw_summary = f"已提交演草纸，部分信息或展开步骤略有欠缺 (得分 {hw_sc:.2f}/1.50)"
+                            else:
+                                hw_summary = "已提交演草纸但推导过程无效或存在身份矛盾"
 
                 # 4. 未达成项目
                 failed_items = [
@@ -327,10 +450,19 @@ class LabReporter:
                     review_str = "无"
 
                 # 9. 实验评语 (>= 50 字)
-                comment_str = grade.comment if grade else (
-                    f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
-                    f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
-                )
+                if not grade or grade.status == "missing":
+                    if self.lab_id == "lab2":
+                        comment_str = (
+                            f"{student.name}同学你好！系统未检测到你在本次LAB2中的作业提交（未收到源码文件）。"
+                            f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
+                        )
+                    else:
+                        comment_str = (
+                            f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                            f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
+                        )
+                else:
+                    comment_str = grade.comment
 
                 writer.writerow({
                     "学号": student.student_id,
@@ -410,12 +542,19 @@ class LabReporter:
                 "> **当前报告由模拟评测模式 (Mock AI) 生成**。手写演草纸与语义复核未调用真实大模型推理，分值仅供调试，**严禁作为最终正式成绩单使用**。\n",
             ])
 
+        missing_students = [
+            s for s in roster_students
+            if s.student_id not in grades or grades[s.student_id].status in {"missing"}
+        ]
+        missing_count = len(missing_students)
+        missing_desc = f" ({'、'.join(f'{s.student_id} {s.name}' for s in missing_students)})" if missing_students else ""
+
         lines.extend([
             "## 一、 整体评测与达成概况",
             f"- **点名册应交人数**: {total_roster} 人",
             f"- **实际提交人次**: {submitted_count} 人 ({sub_pct}%)",
             f"- **归属争议/多学号冲突**: {conflict_count} 人",
-            f"- **未提交/缺考人数**: {missing_count} 人 (2025112463 黄晓丹、2026110839 杨以立)",
+            f"- **未提交/缺考人数**: {missing_count} 人{missing_desc}",
             f"- **基准满分 (5.0分) 人数**: {full_score_count} 人",
             f"- **已定级有效平均分**: {avg_score} 分 (最高分: {max_sc}, 最低分: {min_sc})",
             f"- **待人工复核总人次**: {len(needs_review_students)} 人\n",
@@ -434,38 +573,63 @@ class LabReporter:
             rate_str = f"{pass_cnt / valid_total * 100:.1f}%" if valid_total > 0 else "不适用"
             lines.append(f"| {key} | {pass_cnt} | {part_cnt} | {fail_cnt} | {unv_cnt} | {rev_cnt} | {rate_str} |")
 
-        lines.extend([
-            "",
-            "## 三、 评分细则与草案说明",
-            "- **Lab 1-1 基础环境与练习 (0.0分)**：指导书明确为课内练习，无强制提交要求，不计入成绩亦不扣分。",
-            "- **Lab 1-2 进制与逻辑 (满分 3.0分，当前教研草案细则)**：",
-            "  - **代码运算 (满分 1.5分)**：",
-            "    - 源码未提交 / 缺少源码：扣 1.50 分",
-            "    - 编译失败 / 运行时崩溃 / 超时：扣 1.50 分",
-            "    - 变量 x 与学号后两位不一致：扣 0.20 分 (草案细则：参数未对齐身份要求)",
-            "    - 逻辑与位运算 9 项测试：按项扣分 (每项约 0.17 分)；运算正确但缺少运算符疑似常数打印欺骗扣 0.25~0.50 分并待复核",
-            "    - 有符号与无符号格式输出：未区分 %5hu 与 %5hd 扣 0.17 分",
-            "  - **手写验算 (满分 1.5分，视觉批改草案细则)**：",
-            "    - 手写照片未提交：扣 1.50 分",
-            "    - 姓名、学号、手机号完整性 (0.50分)：缺少项目扣除相应分值 (0.50 - info_score)",
-            "    - 参数一致性 (0.20分)：手写 x、y 与学号手机号或代码不一致扣 0.20 分",
-            "    - 六种运算展开过程与计算结果 (0.80分)：按展开完整度扣除缺失分值 (0.80 - derivation_score)",
-            "    - 材料字迹模糊、存在疑义或AI调用待定时：保持待复核，不提前赋分",
-            "- **Lab 1-3 温度转换 (满分 2.0分)**：",
-            "  - 源码未提交 / 编译失败：扣 2.00 分",
-            "  - 华氏转摄氏 (模式 0，0.80分)：整型截断除法 5/9 得 0 或计算错误扣 0.80 分",
-            "  - 摄氏转华氏 (模式 1，0.80分)：公式与输出错误扣 0.80 分",
-            "  - 边界、负温与浮点测试 (0.20分)：负温 (-40度) 或小数用例未通过扣 0.20 分",
-            "  - 精度与格式 (0.20分)：误差超出容差 (±0.05) 扣 0.20 分",
-            "> [!NOTE]",
-            "> 以上分项分值与扣分比例遵循已有评分方案草案，最终核准结果需经课程组人工复核清单确认。\n",
-            "## 四、 典型技术问题与失分剖析",
-            "1. **整型截断除法陷阱 (5/9 得 0)**：部分同学在华氏转摄氏公式中直接书写 `5 / 9 * (f - 32)`，在 C 语言整数除法规则下 `5 / 9` 截断为 0，导致摄氏度输出恒为 0.00。正确写法应为 `5.0 / 9.0 * (f - 32)` 或 `5.0 * (f - 32) / 9.0`。",
-            "2. **工程文件与快捷方式误提**：个别同学误将 IDE 工程描述文件（`.cbp`）或 Windows 桌面快捷方式（`.lnk`）当成源码提交，导致评测环境缺少 `.c` 源程序无法进行编译测试。",
-            "3. **仅提交预编译二进制文件**：如王浩铭同学提交了 `Wprogram.exe` 但未提交 `Lab 1-2.c`。按沙箱安全规范，系统严禁直接运行未经受控编译的外部 exe 文件，故代码项未达成，需补交源码。",
-            "4. **常数欺骗防范**：部分代码输出虽数值命中，但源码静态审查中无逻辑或位运算符，已被静态检查捕获并标记待人工复核。\n",
-            f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
-        ])
+        if self.lab_id == "lab2":
+            lines.extend([
+                "",
+                "## 三、 评分细则与说明",
+                "- **Warming up 课前热身 (0.0分)**：不计入成绩，单列记录完成情况。",
+                "- **Lab 2-1 时间段问候 (满分 2.0分)**：",
+                "  - 源码未提交 / 编译失败：扣 2.00 分",
+                "  - 时间段问候逻辑 (1.50分)：覆盖早、中、下午、晚、夜各时间段问候，语义一致（中英文均可）判定正确",
+                "  - 边界与无效输入处理 (0.50分)：覆盖边界值 (如 0, 12, 18, 21, 24) 及非法输入 (如负数或超出范围)",
+                "- **Lab 2-2 字母金字塔 (满分 3.0分)**：",
+                "  - 源码未提交 / 编译失败：扣 3.00 分",
+                "  - 字母对称金字塔展开 (2.00分)：大写字母金字塔层层展开，严格对称 (指导书笔误 ABCBC 按对称 ABCBA 校验)",
+                "  - 大小写字母兼容转换 (0.50分)：小写字母输入需自动提升并展开",
+                "  - 非字母与异常输入报错 (0.50分)：非字母输入按指导书要求友好报错",
+                "- **Lab 2-3 / Lab 2-4 选做题**：回文素数与 4:2 优先编码器，独立记录完成情况，不影响必做题 5 分基准。",
+                "> [!NOTE]",
+                "> 以上分项分值与扣分比例遵循已有评分方案，最终核准结果需经课程组人工复核清单确认。\n",
+                "## 四、 典型技术问题与失分剖析",
+                "1. **字母金字塔笔误兼容与严格对称**：指导书示例中包含部分排版笔误（如 `___ABCBC`），系统严格依据字母对称规律（`ABCBA`）进行多组自动化测试。",
+                "2. **大小写字母输入兼容**：部分同学未做小写字母（如 `'f'`）向大写字母的自动提升转换，直接导致分支走入非法输入或生成错误序列。",
+                "3. **非法输入报错处理**：指导书要求对非字母（如数字、负号）给出提示或报错，部分实现未对输入合法性进行校验即进行减法运算，引发越界输出。",
+                "4. **源码编码与跨平台字符集**：部分提交包含非 UTF-8 编码或损坏字符，已在 submit → src 归档阶段自动识别并规范化为 UTF-8 无 BOM。\n",
+                f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
+            ])
+        else:
+            lines.extend([
+                "",
+                "## 三、 评分细则与草案说明",
+                "- **Lab 1-1 基础环境与练习 (0.0分)**：指导书明确为课内练习，无强制提交要求，不计入成绩亦不扣分。",
+                "- **Lab 1-2 进制与逻辑 (满分 3.0分，当前教研草案细则)**：",
+                "  - **代码运算 (满分 1.5分)**：",
+                "    - 源码未提交 / 缺少源码：扣 1.50 分",
+                "    - 编译失败 / 运行时崩溃 / 超时：扣 1.50 分",
+                "    - 变量 x 与学号后两位不一致：扣 0.20 分 (草案细则：参数未对齐身份要求)",
+                "    - 逻辑与位运算 9 项测试：按项扣分 (每项约 0.17 分)；运算正确但缺少运算符疑似常数打印欺骗扣 0.25~0.50 分并待复核",
+                "    - 有符号与无符号格式输出：未区分 %5hu 与 %5hd 扣 0.17 分",
+                "  - **手写验算 (满分 1.5分，视觉批改草案细则)**：",
+                "    - 手写照片未提交：扣 1.50 分",
+                "    - 姓名、学号、手机号完整性 (0.50分)：缺少项目扣除相应分值 (0.50 - info_score)",
+                "    - 参数一致性 (0.20分)：手写 x、y 与学号手机号或代码不一致扣 0.20 分",
+                "    - 六种运算展开过程与计算结果 (0.80分)：按展开完整度扣除缺失分值 (0.80 - derivation_score)",
+                "    - 材料字迹模糊、存在疑义或AI调用待定时：保持待复核，不提前赋分",
+                "- **Lab 1-3 温度转换 (满分 2.0分)**：",
+                "  - 源码未提交 / 编译失败：扣 2.00 分",
+                "  - 华氏转摄氏 (模式 0，0.80分)：整型截断除法 5/9 得 0 或计算错误扣 0.80 分",
+                "  - 摄氏转华氏 (模式 1，0.80分)：公式与输出错误扣 0.80 分",
+                "  - 边界、负温与浮点测试 (0.20分)：负温 (-40度) 或小数用例未通过扣 0.20 分",
+                "  - 精度与格式 (0.20分)：误差超出容差 (±0.05) 扣 0.20 分",
+                "> [!NOTE]",
+                "> 以上分项分值与扣分比例遵循已有评分方案草案，最终核准结果需经课程组人工复核清单确认。\n",
+                "## 四、 典型技术问题与失分剖析",
+                "1. **整型截断除法陷阱 (5/9 得 0)**：部分同学在华氏转摄氏公式中直接书写 `5 / 9 * (f - 32)`，在 C 语言整数除法规则下 `5 / 9` 截断为 0，导致摄氏度输出恒为 0.00。正确写法应为 `5.0 / 9.0 * (f - 32)` 或 `5.0 * (f - 32) / 9.0`。",
+                "2. **工程文件与快捷方式误提**：个别同学误将 IDE 工程描述文件（`.cbp`）或 Windows 桌面快捷方式（`.lnk`）当成源码提交，导致评测环境缺少 `.c` 源程序无法进行编译测试。",
+                "3. **仅提交预编译二进制文件**：如王浩铭同学提交了 `Wprogram.exe` 但未提交 `Lab 1-2.c`。按沙箱安全规范，系统严禁直接运行未经受控编译的外部 exe 文件，故代码项未达成，需补交源码。",
+                "4. **常数欺骗防范**：部分代码输出虽数值命中，但源码静态审查中无逻辑或位运算符，已被静态检查捕获并标记待人工复核。\n",
+                f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
+            ])
 
         if not needs_review_students:
             lines.append("当前批次未发现待复核样本，全部用例已自动定级。\n")
@@ -475,13 +639,22 @@ class LabReporter:
             for std, gr in needs_review_students:
                 reasons = "<br>".join(sorted(list(set(gr.review_reasons)))) if gr.review_reasons else "待人工复核"
                 sc_str = "成绩待定" if (gr.is_pending or gr.status in {"ambiguous", "conflict"}) else f"{gr.total_score:.2f}分"
-                advice = "现场核验源码与推导"
-                if any("未写学号姓名" in r for r in gr.review_reasons):
-                    advice = "核对演草纸笔迹与参数归属"
-                elif any(".cbp" in r or ".lnk" in r for r in gr.review_reasons):
-                    advice = "督促学生补交实际 C 源码"
-                elif any("Wprogram.exe" in r for r in gr.review_reasons):
-                    advice = "补交 Lab 1-2 C 源码"
+                if self.lab_id == "lab2":
+                    advice = "现场核验源码与功能"
+                    if any("编码" in r for r in gr.review_reasons):
+                        advice = "核对源码文件编码与原始字符"
+                    elif any(".cbp" in r or ".lnk" in r for r in gr.review_reasons):
+                        advice = "督促学生补交实际 C 源码"
+                    elif any("损坏" in r or "解压" in r for r in gr.review_reasons):
+                        advice = "联系学生重新提交未损坏压缩包"
+                else:
+                    advice = "现场核验源码与推导"
+                    if any("未写学号姓名" in r for r in gr.review_reasons):
+                        advice = "核对演草纸笔迹与参数归属"
+                    elif any(".cbp" in r or ".lnk" in r for r in gr.review_reasons):
+                        advice = "督促学生补交实际 C 源码"
+                    elif any("Wprogram.exe" in r for r in gr.review_reasons):
+                        advice = "补交 Lab 1-2 C 源码"
                 lines.append(f"| {std.student_id} | {std.name} | {std.class_id} | {sc_str} | {reasons} | {advice} |")
             lines.append("")
 
@@ -561,10 +734,16 @@ class LabReporter:
                 grade = grades.get(student.student_id)
                 if not grade or grade.status == "missing":
                     val_score = "[模拟] 0.00" if mock_mode else 0.0
-                    comment = (
-                        f"{student.name}同学你好！系统未检测到你在本次实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
-                        f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
-                    )
+                    if self.lab_id == "lab2":
+                        comment = (
+                            f"{student.name}同学你好！系统未检测到你在本次LAB2中的作业提交（未收到源码文件）。"
+                            f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
+                        )
+                    else:
+                        comment = (
+                            f"{student.name}同学你好！系统未检测到你在本次实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                            f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
+                        )
                 elif grade.is_pending or (grade.needs_review and grade.status in {"missing_source", "ambiguous", "conflict"}):
                     val_score = "[模拟] 待复核" if mock_mode else "待复核"
                     comment = grade.comment

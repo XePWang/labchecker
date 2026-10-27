@@ -128,7 +128,8 @@ class StudentGrade:
     @property
     def all_check_items(self) -> List[CheckItem]:
         items: List[CheckItem] = []
-        for pid in sorted(self.problem_results.keys()):
+        order_key = lambda x: (0, x) if x.lower() in {"warmup", "1-1"} else (1, x)
+        for pid in sorted(self.problem_results.keys(), key=order_key):
             items.extend(self.problem_results[pid].check_items)
         for pid in sorted(self.optional_results.keys()):
             items.extend(self.optional_results[pid].check_items)
