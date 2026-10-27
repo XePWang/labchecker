@@ -374,7 +374,14 @@ class Lab1Judge(BaseLabJudge):
             # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
             cand_evaluations = []
             for cand_idx, cand_src in enumerate(sources):
-                c_text = cand_src.read_text(encoding="utf-8", errors="ignore")
+                sf = next((f for f in all_files if f.path == cand_src), None)
+                c_encoding_error = sf.encoding_error if sf else ""
+                try:
+                    c_text = cand_src.read_text(encoding="utf-8")
+                except Exception as e:
+                    c_text = ""
+                    c_encoding_error = f"UTF-8 解码失败: {e}"
+
                 c_has_log = all(op in c_text for op in ["!", "||", "&&"])
                 c_has_bit = all(op in c_text for op in ["~", "|", "&"])
                 m_x = re.search(r'\bx\s*=\s*(-?\d+)', c_text)
@@ -394,6 +401,13 @@ class Lab1Judge(BaseLabJudge):
                 c_checks = []
                 c_deduced_y = 0
                 c_v_list = [0] * 9
+
+                if c_encoding_error:
+                    c_notes.append(f"源码编码损坏: {c_encoding_error}")
+                    c_needs_review = True
+                    c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
+                elif sf and sf.encoding_converted:
+                    c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
                 if c_code_x is not None and c_code_x != expected_x:
                     c_notes.append(f"源码中 x 赋值 ({c_code_x}) 与学号后两位 ({expected_x}) 不一致")
@@ -583,15 +597,19 @@ class Lab1Judge(BaseLabJudge):
 
         # 1. 源码提交
         if sources:
+            src_sf = next((f for f in all_files if f.path == src_path), None)
+            enc_note = f" (已自 {src_sf.source_encoding} 规范化为 UTF-8)" if (src_sf and src_sf.encoding_converted) else ""
+            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
+            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {src_sf.source_encoding})" if (src_sf and src_sf.encoding_converted) else "源码文件归档正常")
             items.append(CheckItem(
                 problem_id="1-2",
                 sub_item="源码提交",
                 submission_status="已提交",
                 completion_status="已达成",
-                evidence=f"提交源码文件: {src_path.name} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}",
+                evidence=ev_str,
                 deduction=0.0,
                 deduction_reason="",
-                agent_note=f"多候选已择优采用最高分版本: {src_path.name}" if len(sources) > 1 else "源码文件归档正常",
+                agent_note=an_str,
                 needs_review=False,
             ))
         elif corrupt_archives:
@@ -1243,7 +1261,14 @@ class Lab1Judge(BaseLabJudge):
             # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
             cand_evaluations = []
             for cand_idx, cand_src in enumerate(sources):
-                c_text = cand_src.read_text(encoding="utf-8", errors="replace") if cand_src.exists() else ""
+                sf = next((f for f in all_files if f.path == cand_src), None)
+                c_encoding_error = sf.encoding_error if sf else ""
+                try:
+                    c_text = cand_src.read_text(encoding="utf-8") if cand_src.exists() else ""
+                except Exception as e:
+                    c_text = ""
+                    c_encoding_error = f"UTF-8 解码失败: {e}"
+
                 if precompiled and (student.student_id, "1-3", cand_idx) in precompiled:
                     c_compile = precompiled[(student.student_id, "1-3", cand_idx)]
                 else:
@@ -1256,6 +1281,13 @@ class Lab1Judge(BaseLabJudge):
                 c_is_pending = False
                 c_has_int_div_bug = False
                 c_passed_cases = 0
+
+                if c_encoding_error:
+                    c_notes.append(f"源码编码损坏: {c_encoding_error}")
+                    c_needs_review = True
+                    c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
+                elif sf and sf.encoding_converted:
+                    c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
                 if not c_compile.success:
                     c_notes.append(f"Lab 1-3 ({cand_src.name}) 编译失败")
@@ -1415,15 +1447,19 @@ class Lab1Judge(BaseLabJudge):
 
         # 1. 源码提交
         if sources:
+            src_sf = next((f for f in all_files if f.path == src_path), None)
+            enc_note = f" (已自 {src_sf.source_encoding} 规范化为 UTF-8)" if (src_sf and src_sf.encoding_converted) else ""
+            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
+            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {src_sf.source_encoding})" if (src_sf and src_sf.encoding_converted) else "源码归档正常")
             items.append(CheckItem(
                 problem_id="1-3",
                 sub_item="源码提交",
                 submission_status="已提交",
                 completion_status="已达成",
-                evidence=f"提交源码文件: {src_path.name} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}",
+                evidence=ev_str,
                 deduction=0.0,
                 deduction_reason="",
-                agent_note=f"多候选已择优采用最高分版本: {src_path.name}" if len(sources) > 1 else "源码归档正常",
+                agent_note=an_str,
                 needs_review=False,
             ))
         elif corrupt_archives:

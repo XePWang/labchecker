@@ -196,6 +196,10 @@ def run_lab(
             print(f"[*] 全班历史批次成绩文件不存在，仅保留单人独立报表，未覆盖全班花名册。")
     else:
         # 全量批次模式
+        encoding_stats = {
+            "converted_count": normalizer.converted_encoding_count,
+            "unknown_count": len(normalizer.unknown_encoding_files),
+        }
         report_paths = reporter.generate_all_reports(
             roster_students=roster_mgr.students,
             grades=grades,
@@ -203,6 +207,7 @@ def run_lab(
             unmatched_items=normalizer.unmatched_items,
             excel_template_path=template_path if template_path.exists() else None,
             mock_mode=mock_ai,
+            encoding_stats=encoding_stats,
         )
 
         print(f"[+] 报表生成完毕:")

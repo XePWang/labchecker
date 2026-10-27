@@ -1547,5 +1547,126 @@ int main() {
         )
         self.assertAlmostEqual(res["suggested_score"], 0.1, places=2)
 
+    def test_39_detect_and_decode_source_encodings(self):
+        """测试39: 严格编码识别与多字符集解码校验 (UTF-8, UTF-8 BOM, GBK/GB18030, UTF-16, 拒绝二进制与损坏兜底)"""
+        from checker.unpack import detect_and_decode_source
+
+        # 1. 纯 ASCII
+        ascii_code = b"#include <stdio.h>\nint main() { return 0; }\n"
+        ok, enc, text, conv, err = detect_and_decode_source(ascii_code)
+        self.assertTrue(ok)
+        self.assertEqual(enc, "utf-8")
+        self.assertFalse(conv)
+        self.assertIn("main", text)
+
+        # 2. UTF-8 含中文
+        utf8_code = "// 摄氏温度转华氏温度\n#include <stdio.h>\n".encode("utf-8")
+        ok, enc, text, conv, err = detect_and_decode_source(utf8_code)
+        self.assertTrue(ok)
+        self.assertEqual(enc, "utf-8")
+        self.assertFalse(conv)
+        self.assertIn("摄氏温度", text)
+
+        # 3. UTF-8 with BOM
+        utf8_bom_code = b"\xef\xbb\xbf" + utf8_code
+        ok, enc, text, conv, err = detect_and_decode_source(utf8_bom_code)
+        self.assertTrue(ok)
+        self.assertEqual(enc, "utf-8-sig")
+        self.assertTrue(conv)
+        self.assertIn("摄氏温度", text)
+
+        # 4. GBK / GB18030
+        gbk_code = "// 华氏度与摄氏度转换程序\n#include <stdio.h>\nint main(){ return 0; }".encode("gbk")
+        ok, enc, text, conv, err = detect_and_decode_source(gbk_code)
+        self.assertTrue(ok)
+        self.assertEqual(enc, "gb18030")
+        self.assertTrue(conv)
+        self.assertIn("华氏度与摄氏度", text)
+
+        # 5. UTF-16 with BOM
+        utf16_bom = "// 字母金字塔程序\n".encode("utf-16")
+        ok, enc, text, conv, err = detect_and_decode_source(utf16_bom)
+        self.assertTrue(ok)
+        self.assertIn("utf-16", enc)
+        self.assertTrue(conv)
+        self.assertIn("字母金字塔", text)
+
+        # 6. UTF-16 without BOM (结构特征显著)
+        utf16_nobom = "#include <stdio.h>\nint main() { return 0; }\n".encode("utf-16-le")
+        ok, enc, text, conv, err = detect_and_decode_source(utf16_nobom)
+        self.assertTrue(ok)
+        self.assertEqual(enc, "utf-16-le")
+        self.assertTrue(conv)
+        self.assertIn("main", text)
+
+        # 7. 二进制文件识别并拒绝转码 (含非打印控制字符)
+        binary_data = b"PK\x03\x04\x14\x00\x00\x00\x08\x00"
+        ok, enc, text, conv, err = detect_and_decode_source(binary_data)
+        self.assertFalse(ok)
+        self.assertEqual(enc, "binary")
+
+        # 8. 损坏编码识别并拒绝错误假转码 (严禁 Latin-1 或 errors='replace' 兜底)
+        corrupted = b"int main() { /* \xff\xff\xff\xff */ }"
+        ok, enc, text, conv, err = detect_and_decode_source(corrupted)
+        self.assertFalse(ok)
+        self.assertEqual(enc, "unknown")
+
+    def test_40_staging_encoding_normalization(self):
+        """测试40: 归档阶段 submit -> src 自动将 GBK/UTF-8-BOM 转为标准 UTF-8 无 BOM"""
+        lab_dir = self.test_work / "test_40_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+        # 创建一个 GBK 编码的 1-3 源码提交文件
+        gbk_text = '// 华氏温度转摄氏温度\n#include <stdio.h>\nint main() { printf("华氏温度=%.2f\\n", 32.0); return 0; }'
+        gbk_file = submit_dir / f"{std.student_id}_Lab1-3.c"
+        gbk_file.write_bytes(gbk_text.encode("gb18030"))
+
+        normalizer = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged = normalizer.process_all_submissions()
+
+        self.assertIn(std.student_id, staged)
+        std_files = staged[std.student_id]
+        src_files = [f for f in std_files if f.file_type == "c_source"]
+        self.assertEqual(len(src_files), 1)
+        sf = src_files[0]
+        self.assertEqual(sf.source_encoding, "gb18030")
+        self.assertTrue(sf.encoding_converted)
+        self.assertEqual(sf.encoding_error, "")
+
+        # 验证 src 目录中的文件是严格 UTF-8 无 BOM
+        staged_bytes = sf.path.read_bytes()
+        self.assertFalse(staged_bytes.startswith(b"\xef\xbb\xbf"), "必须保存为无 BOM 的 UTF-8")
+        staged_text = staged_bytes.decode("utf-8")  # strict!
+        self.assertIn("华氏温度转摄氏温度", staged_text)
+
+    def test_41_staging_idempotence_and_no_alt_creation(self):
+        """测试41: 归档幂等性测试，重复归档原始 GBK 文件严禁产生 _alt 冗余副本"""
+        lab_dir = self.test_work / "test_41_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+        gbk_text = '// 测试幂等性归档\n#include <stdio.h>\nint main() { return 0; }'
+        gbk_file = submit_dir / f"{std.student_id}_Lab1-3.c"
+        gbk_file.write_bytes(gbk_text.encode("gb18030"))
+
+        # 第一次归档
+        norm1 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        norm1.process_all_submissions()
+
+        std_src_dir = lab_dir / "src" / std.student_id
+        files_after_run1 = list(std_src_dir.glob("*.c"))
+        self.assertEqual(len(files_after_run1), 1)
+
+        # 第二次归档 (直接重新运行，submit 内容未变)
+        norm2 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        norm2.process_all_submissions()
+
+        files_after_run2 = list(std_src_dir.glob("*.c"))
+        self.assertEqual(len(files_after_run2), 1, "重复归档不得因原始 GBK 与规范化 UTF-8 字节不同而生成 _alt 副本")
+        self.assertFalse(any("_alt" in f.name for f in files_after_run2))
+
 if __name__ == "__main__":
     unittest.main()

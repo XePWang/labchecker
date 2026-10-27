@@ -31,6 +31,7 @@ class LabReporter:
         unmatched_items: Optional[List[Dict[str, Any]]] = None,
         excel_template_path: Optional[Path] = None,
         mock_mode: bool = False,
+        encoding_stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Path]:
         """生成全套标准报表并返回文件路径字典"""
         csv_detail_path = self.generate_detail_csv(roster_students, grades, mock_mode=mock_mode)
@@ -40,6 +41,7 @@ class LabReporter:
             ambiguous_items=ambiguous_items,
             unmatched_items=unmatched_items,
             mock_mode=mock_mode,
+            encoding_stats=encoding_stats,
         )
         csv_roster_path = self.generate_roster_grade_csv(roster_students, grades, mock_mode=mock_mode)
 
@@ -353,6 +355,7 @@ class LabReporter:
         ambiguous_items: Optional[List[Dict[str, Any]]] = None,
         unmatched_items: Optional[List[Dict[str, Any]]] = None,
         mock_mode: bool = False,
+        encoding_stats: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """导出 labX报告.md"""
         file_path = self.output_dir / f"{self.lab_id}报告.md"
@@ -517,8 +520,15 @@ class LabReporter:
             "## 七、 编译与兼容性环境处理说明",
             "- Linux 环境对标 GCC `-std=c11`，数学库 `-lm` 位于命令末尾确保符号解析无误。",
             "- 针对 Windows 平台特有的 `<windows.h>`、`<conio.h>`、`system(\"pause\")`、`scanf_s` 及 GBK 编码源码，已全自动生成 `_compat` 编译副本并保存审计日志，未改变学生核心算法与数学公式。",
-            "- 所有程序均在资源隔离沙箱下运行，隔离网络并以 tmpfs 阴影隔离宿主关键目录，进程组级流式超时强杀防范死循环与内存泄露。\n",
+            "- 所有程序均在资源隔离沙箱下运行，隔离网络并以 tmpfs 阴影隔离宿主关键目录，进程组级流式超时强杀防范死循环与内存泄露。",
         ])
+        if encoding_stats:
+            conv_cnt = encoding_stats.get("converted_count", 0)
+            unk_cnt = encoding_stats.get("unknown_count", 0)
+            lines.append(
+                f"- 源码编码识别与 UTF-8 规范化：submit → src 归档阶段对全部源码与头文件执行严格编码识别，支持 UTF-8、UTF-8 BOM、GBK/GB18030 以及 UTF-16。本批次共识别并规范化转码 {conv_cnt} 份源码，未确定或损坏编码 {unk_cnt} 份。所有源码统一以标准 UTF-8（无 BOM）保存，彻底消除 GCC 跨平台与静态分析字符集乱码。"
+            )
+        lines.append("")
 
         file_path.write_text("\n".join(lines), encoding="utf-8")
         return file_path

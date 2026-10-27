@@ -149,11 +149,11 @@ class Lab2Judge(BaseLabJudge):
             )
 
         # 2. 评测 Lab 2-1 (2.0分)
-        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives)
+        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives, all_files=files)
         grade.problem_results["2-1"] = res2_1
 
         # 3. 评测 Lab 2-2 (3.0分)
-        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives)
+        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives, all_files=files)
         grade.problem_results["2-2"] = res2_2
 
         # 4. 评测选做题 Lab 2-3 与 2-4 (独立记录完成情况)
@@ -200,6 +200,7 @@ class Lab2Judge(BaseLabJudge):
         mock_ai: bool,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
         corrupt_archives: Optional[List[SubmissionFile]] = None,
+        all_files: Optional[List[SubmissionFile]] = None,
     ) -> ProblemResult:
         """评测 Lab 2-1：时间段问候 (2.0分)"""
         prob = ProblemResult(problem_id="2-1", score=0.0, max_score=2.0, source_files=sources)
@@ -219,7 +220,14 @@ class Lab2Judge(BaseLabJudge):
         # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
         cand_evaluations = []
         for cand_idx, cand_src in enumerate(sources):
-            c_text = cand_src.read_text(encoding="utf-8", errors="ignore")
+            sf = next((f for f in (all_files or []) if f.path == cand_src), None)
+            c_encoding_error = sf.encoding_error if sf else ""
+            try:
+                c_text = cand_src.read_text(encoding="utf-8")
+            except Exception as e:
+                c_text = ""
+                c_encoding_error = f"UTF-8 解码失败: {e}"
+
             if precompiled and (student.student_id, "2-1", cand_idx) in precompiled:
                 c_compile = precompiled[(student.student_id, "2-1", cand_idx)]
             else:
@@ -230,6 +238,13 @@ class Lab2Judge(BaseLabJudge):
             c_needs_review = False
             c_is_pending = False
             passed_cases = 0
+
+            if c_encoding_error:
+                c_notes.append(f"源码编码损坏: {c_encoding_error}")
+                c_needs_review = True
+                c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
+            elif sf and sf.encoding_converted:
+                c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
             if not c_compile.success:
                 c_notes.append(f"Lab 2-1 ({cand_src.name}) 编译失败")
@@ -362,6 +377,7 @@ class Lab2Judge(BaseLabJudge):
         mock_ai: bool,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
         corrupt_archives: Optional[List[SubmissionFile]] = None,
+        all_files: Optional[List[SubmissionFile]] = None,
     ) -> ProblemResult:
         """
         评测 Lab 2-2：字母金字塔 (3.0分)
@@ -394,6 +410,8 @@ class Lab2Judge(BaseLabJudge):
         # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
         cand_evaluations = []
         for cand_idx, cand_src in enumerate(sources):
+            sf = next((f for f in (all_files or []) if f.path == cand_src), None)
+            c_encoding_error = sf.encoding_error if sf else ""
             if precompiled and (student.student_id, "2-2", cand_idx) in precompiled:
                 c_compile = precompiled[(student.student_id, "2-2", cand_idx)]
             else:
@@ -402,6 +420,11 @@ class Lab2Judge(BaseLabJudge):
             c_notes = []
             passed_cases = 0
             typo_detected = False
+
+            if c_encoding_error:
+                c_notes.append(f"源码编码损坏: {c_encoding_error}")
+            elif sf and sf.encoding_converted:
+                c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
             if not c_compile.success:
                 c_notes.append(f"Lab 2-2 ({cand_src.name}) 编译失败")

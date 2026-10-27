@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 from checker.config import C_STANDARD, CXX_STANDARD, GCC_PATH, GXX_PATH
 from checker.models import CompileResult, CompileTask
+from checker.unpack import detect_and_decode_source
 
 # 编译器通用参数与链接选项 (确保 -lm 放置于末尾以满足 GCC 链接符号解析规则)
 COMPILER_FLAGS = ["-O2", "-Wall"]
@@ -117,14 +118,11 @@ static int _labchecker_scanf_s(const char *fmt, ...) {
 
 
 def detect_and_convert_encoding(raw_bytes: bytes) -> Tuple[str, str]:
-    """尝试以 UTF-8、GBK、GB18030 等多编码解码源码"""
-    for enc in ["utf-8", "gb18030", "gbk", "cp936", "latin-1"]:
-        try:
-            text = raw_bytes.decode(enc)
-            return text, enc
-        except UnicodeDecodeError:
-            continue
-    return raw_bytes.decode("utf-8", errors="replace"), "utf-8(fallback)"
+    """严格识别并转换源码编码，严禁使用 latin-1 或 errors='replace' 掩盖乱码"""
+    ok, enc, text, _, err = detect_and_decode_source(raw_bytes)
+    if ok:
+        return text, enc
+    raise UnicodeDecodeError(enc, raw_bytes, 0, len(raw_bytes), err or "无法可靠解码")
 
 
 def generate_compat_source(source_text: str) -> Tuple[str, List[str]]:
@@ -288,7 +286,10 @@ class ProjectCompiler:
         # 编译失败，分析是否属于 Windows 兼容性问题
         first_err = res.stderr
         raw_bytes = src_path.read_bytes()
-        decoded_text, src_enc = detect_and_convert_encoding(raw_bytes)
+        try:
+            decoded_text, src_enc = detect_and_convert_encoding(raw_bytes)
+        except Exception:
+            decoded_text, src_enc = "", "unknown"
 
         needs_compat = False
         compat_reasons = []

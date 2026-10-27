@@ -56,6 +56,117 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
+def is_valid_cjk_or_punct(ch: str) -> bool:
+    """检查单个字符是否属于 CJK 表意字符、常用全角符号、标点符号或数学符号"""
+    cp = ord(ch)
+    return (
+        (0x4E00 <= cp <= 0x9FFF)       # CJK Unified Ideographs
+        or (0x3400 <= cp <= 0x4DBF)   # CJK Extension A
+        or (0x20000 <= cp <= 0x2A6DF) # CJK Extension B
+        or (0xF900 <= cp <= 0xFAFF)   # CJK Compatibility Ideographs
+        or (0x3000 <= cp <= 0x303F)   # CJK Symbols and Punctuation (、。，《》【】等)
+        or (0xFF01 <= cp <= 0xFFEE)   # Halfwidth and Fullwidth Forms (！，：等)
+        or (0x2000 <= cp <= 0x206F)   # General Punctuation (“”‘’—…等)
+        or (0x00A0 <= cp <= 0x00FF)   # Latin-1 Supplement (如 ° 摄氏度符号等)
+        or (0x2190 <= cp <= 0x22FF)   # Arrows & Math Operators
+    )
+
+
+def has_binary_controls(text: str) -> bool:
+    """检测文本是否包含二进制文件特有的非打印控制字符 (除常见空白符 \\t, \\n, \\r 外的 0x00-0x08, 0x0B, 0x0E-0x1F)"""
+    for ch in text:
+        cp = ord(ch)
+        if (0 <= cp <= 8) or (cp == 11) or (14 <= cp <= 31):
+            return True
+    return False
+
+
+def detect_and_decode_source(raw_bytes: bytes) -> Tuple[bool, str, str, bool, Optional[str]]:
+    """
+    对源文件/头文件字节流执行严格编码识别与解码。
+    返回: (ok: bool, encoding_name: str, decoded_text: str, converted: bool, error_msg: Optional[str])
+    严格规则:
+    1. 严禁使用 errors='ignore'、errors='replace' 或 Latin-1 无条件兜底。
+    2. 支持 UTF-8、UTF-8 BOM、GBK/GB18030、以及有明确依据的 UTF-16 (BOM 或交替 ASCII 结构)。
+    3. 识别出非 ASCII 字符必须有充分的 CJK 或合法文本特征，二进制/损坏文件拒绝转码并返回 False。
+    """
+    if not raw_bytes:
+        return True, "utf-8", "", False, None
+
+    # 1. 检查已知 BOM 标识
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        try:
+            text = raw_bytes[3:].decode("utf-8")
+            if not has_binary_controls(text):
+                return True, "utf-8-sig", text, True, None
+            return False, "binary", "", False, "文件包含二进制非打印控制字符"
+        except UnicodeDecodeError as e:
+            return False, "utf-8-sig", "", False, f"UTF-8 BOM 内容损坏: {e}"
+
+    if raw_bytes.startswith(b"\xff\xfe"):
+        try:
+            text = raw_bytes[2:].decode("utf-16-le")
+            if not has_binary_controls(text):
+                return True, "utf-16-le", text, True, None
+            return False, "binary", "", False, "文件包含二进制非打印控制字符"
+        except UnicodeDecodeError as e:
+            return False, "utf-16-le", "", False, f"UTF-16LE BOM 内容损坏: {e}"
+
+    if raw_bytes.startswith(b"\xfe\xff"):
+        try:
+            text = raw_bytes[2:].decode("utf-16-be")
+            if not has_binary_controls(text):
+                return True, "utf-16-be", text, True, None
+            return False, "binary", "", False, "文件包含二进制非打印控制字符"
+        except UnicodeDecodeError as e:
+            return False, "utf-16-be", "", False, f"UTF-16BE BOM 内容损坏: {e}"
+
+    # 2. 检查无 BOM 的 UTF-16 (必须具备极高置信度的交替高/低位 0x00 特征)
+    if len(raw_bytes) >= 4 and len(raw_bytes) % 2 == 0:
+        null_high = sum(1 for i in range(1, len(raw_bytes), 2) if raw_bytes[i] == 0)
+        if null_high / (len(raw_bytes) // 2) > 0.6:
+            try:
+                text = raw_bytes.decode("utf-16-le")
+                if not has_binary_controls(text):
+                    return True, "utf-16-le", text, True, None
+            except UnicodeDecodeError:
+                pass
+        null_low = sum(1 for i in range(0, len(raw_bytes), 2) if raw_bytes[i] == 0)
+        if null_low / (len(raw_bytes) // 2) > 0.6:
+            try:
+                text = raw_bytes.decode("utf-16-be")
+                if not has_binary_controls(text):
+                    return True, "utf-16-be", text, True, None
+            except UnicodeDecodeError:
+                pass
+
+    # 3. 严格尝试 UTF-8 解码
+    try:
+        text = raw_bytes.decode("utf-8")
+        if not has_binary_controls(text):
+            return True, "utf-8", text, False, None
+        return False, "binary", "", False, "文件包含二进制非打印控制字符"
+    except UnicodeDecodeError:
+        pass
+
+    # 4. 严格尝试 GB18030 / GBK 解码 (校验有效 CJK 文本特征，杜绝任意二进制误判)
+    try:
+        text = raw_bytes.decode("gb18030")
+        if not has_binary_controls(text):
+            non_ascii = [c for c in text if ord(c) > 127]
+            if non_ascii:
+                valid_cjk = sum(1 for c in non_ascii if is_valid_cjk_or_punct(c))
+                if valid_cjk / len(non_ascii) >= 0.7:
+                    return True, "gb18030", text, True, None
+                return False, "unknown", "", False, "以 GB18030 解码成功但非 ASCII 字符大多不是有效汉字或标点"
+            else:
+                return True, "gb18030", text, False, None
+    except UnicodeDecodeError:
+        pass
+
+    return False, "unknown", "", False, "严格多编码解码均失败 (不支持或损坏编码)"
+
+
 def is_safe_extract_path(base_dir: Path, target_path: Path) -> bool:
     """
     实际防范 Zip Slip 路径穿越与链接逃逸 (通过 relative_to 严格校验归属性，杜绝同名前缀绕过)
@@ -223,6 +334,9 @@ class SubmissionNormalizer:
         self.conflict_students: Dict[str, str] = {}
         # 学号到视觉推断审计原因的映射
         self.inferred_students: Dict[str, str] = {}
+        # 源码编码转换统计
+        self.converted_encoding_count: int = 0
+        self.unknown_encoding_files: List[Dict[str, str]] = []
 
     def _is_container_dir(self, d: Path) -> bool:
         """检查目录是否为包裹了学生提交的容器目录"""
@@ -622,7 +736,8 @@ class SubmissionNormalizer:
     ) -> Optional[SubmissionFile]:
         """识别文件题号、保留相对子目录结构，安全拷贝至 labX/src/<student_id>/"""
         ext = raw_file.suffix.lower()
-        if ext in ALLOWED_SOURCE_EXTS:
+        is_source = ext in ALLOWED_SOURCE_EXTS
+        if is_source:
             ftype = "c_source" if ext in {".c", ".h"} else "cpp_source"
         elif ext in ALLOWED_IMAGE_EXTS:
             ftype = "image"
@@ -636,6 +751,33 @@ class SubmissionNormalizer:
             ftype = "executable"
         else:
             return None
+
+        # 源文件编码识别与 UTF-8 规范化
+        source_encoding = "binary"
+        encoding_converted = False
+        encoding_error = ""
+        content_for_matching = ""
+
+        raw_bytes = raw_file.read_bytes()
+        if is_source:
+            ok, enc, text, conv, err = detect_and_decode_source(raw_bytes)
+            source_encoding = enc
+            encoding_converted = conv
+            if ok:
+                final_bytes = text.encode("utf-8")
+                content_for_matching = text
+                if conv:
+                    self.converted_encoding_count += 1
+            else:
+                final_bytes = raw_bytes
+                encoding_error = err or "未知或损坏编码"
+                self.unknown_encoding_files.append({
+                    "path": str(raw_file),
+                    "student_id": student.student_id,
+                    "error": encoding_error,
+                })
+        else:
+            final_bytes = raw_bytes
 
         name_lower = raw_file.name.lower()
         search_target = f"{rel_path_str} {raw_file.name}".lower()
@@ -659,14 +801,12 @@ class SubmissionNormalizer:
                 matched_problem = "1-2"
             elif ftype in ("c_source", "cpp_source"):
                 # 内容兜底分析（针对如张辰越将 Lab 1-2 源码误命名为 Lab 1-1 等情况）
-                try:
-                    content = raw_file.read_text(errors="ignore")
-                    if any(op in content for op in ["!x", "x||y", "x&&y", "~x", "x|y", "x&y"]):
+                # 统一使用严格解码规范化后的文本，严禁使用 errors="ignore" 掩盖乱码
+                if content_for_matching:
+                    if any(op in content_for_matching for op in ["!x", "x||y", "x&&y", "~x", "x|y", "x&y"]):
                         matched_problem = "1-2"
-                    elif any(kw in content.lower() for kw in ["32", "celsius", "fahrenheit", "centigrade", "华氏", "摄氏"]):
+                    elif any(kw in content_for_matching.lower() for kw in ["32", "celsius", "fahrenheit", "centigrade", "华氏", "摄氏"]):
                         matched_problem = "1-3"
-                except Exception:
-                    pass
         elif self.lab_name == "lab2":
             if is_warmup:
                 matched_problem = "warmup"
@@ -685,17 +825,35 @@ class SubmissionNormalizer:
         target_file_path = target_student_dir / rel_path_str
         target_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if target_file_path.exists() and target_file_path.is_file():
-            if target_file_path.read_bytes() == raw_file.read_bytes():
-                # 完全相同内容，去重跳过，避免生成冗余副本
-                existing = self.student_files.get(student.student_id, [])
-                if any(sf.path == target_file_path for sf in existing):
-                    return None
-            else:
-                stem = target_file_path.stem
-                target_file_path = target_file_path.parent / f"{stem}_alt{ext}"
+        existing_files = self.student_files.get(student.student_id, [])
 
-        shutil.copy2(raw_file, target_file_path)
+        write_needed = True
+        if target_file_path.exists() and target_file_path.is_file():
+            target_bytes = target_file_path.read_bytes()
+            if target_bytes == final_bytes:
+                # 目标已是规范化后的完全相同内容
+                if any(sf.path == target_file_path for sf in existing_files):
+                    return None  # 本次批次扫描中已注册过的条目，去重跳过
+                write_needed = False
+            elif is_source and target_bytes == raw_bytes:
+                # 目标磁盘为历史未转码的原始字节，直接就地规范化覆盖，严禁生成多余 _alt 副本
+                write_needed = True
+            else:
+                # 磁盘上存在与当前候选内容不同的真冲突文件
+                stem = target_file_path.stem
+                idx = 2
+                alt_path = target_file_path.parent / f"{stem}_alt{ext}"
+                while alt_path.exists() and any(sf.path == alt_path for sf in existing_files):
+                    alt_path = target_file_path.parent / f"{stem}_alt{idx}{ext}"
+                    idx += 1
+                target_file_path = alt_path
+                write_needed = True
+
+        if write_needed:
+            if is_source:
+                target_file_path.write_bytes(final_bytes)
+            else:
+                shutil.copy2(raw_file, target_file_path)
 
         return SubmissionFile(
             path=target_file_path,
@@ -703,4 +861,7 @@ class SubmissionNormalizer:
             file_type=ftype,
             matched_problem=matched_problem,
             is_warmup=is_warmup,
+            source_encoding=source_encoding,
+            encoding_converted=encoding_converted,
+            encoding_error=encoding_error,
         )

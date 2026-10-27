@@ -29,6 +29,9 @@ class SubmissionFile:
     matched_problem: Optional[str] = None  # 1-2, 1-3, 2-1, 2-2, 2-3, 2-4, warmup
     is_warmup: bool = False
     note: str = ""
+    source_encoding: str = "utf-8"
+    encoding_converted: bool = False
+    encoding_error: str = ""
 
 
 @dataclass
