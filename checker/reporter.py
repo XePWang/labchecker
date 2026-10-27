@@ -483,15 +483,34 @@ class LabReporter:
             lines.append("")
 
         if ambiguous_items or unmatched_items:
-            lines.append("## 六、 提交文件归属审计与异常数据包清单")
+            lines.append("## 六、 提交文件归属审计与无法归属文件归档清单\n")
+            lines.append(
+                f"所有按学号分类时无法确定归属的提交文件，已统一隔离归档至 **`{self.lab_id}/src/others/`** 目录，"
+                "保留原文件名及来源压缩包结构，同名文件不覆盖，便于后续核验与联系学生。"
+                "无法归属材料统一记录为“无法归属、待复核”，不直接判定为未交或据此扣分。\n"
+            )
             if ambiguous_items:
-                lines.append("**多学号冲突提交件**：")
-                for item in ambiguous_items:
-                    lines.append(f"- 路径: `{item.get('path', '')}` | 候选学号: `{item.get('candidates', [])}` | 说明: {item.get('reason', '')}")
+                lines.append("**多学号冲突提交件**：包含多个候选学号，已统一归档并标记待人工复核。\n")
             if unmatched_items:
-                lines.append("\n**未识别点名册提交件 (安全隔离)**：")
-                for uitem in unmatched_items:
-                    lines.append(f"- 路径: `{uitem.get('path', '')}` | 原因: {uitem.get('reason', '')}")
+                lines.append("**未识别点名册提交件 (安全隔离)**：未匹配到在册学生，已统一归档至 others 目录。\n")
+            lines.append("| 原始提交文件 | 统一归档位置 (`src/others/`) | 归属状态 | 无法归属原因 | 候选学号 | 处理建议 |")
+            lines.append("| :--- | :--- | :---: | :--- | :---: | :--- |")
+
+            all_others = (ambiguous_items or []) + (unmatched_items or [])
+            for item in all_others:
+                orig_path = item.get("path", "")
+                archive_dest = item.get("archive_dest", f"{self.lab_id}/src/others/")
+                status = item.get("status", "无法归属、待复核")
+                reason = item.get("reason", "未匹配学生")
+                cands = item.get("candidates", [])
+                cands_str = ", ".join(cands) if cands else "无"
+                if cands:
+                    advice = "联系候选学生澄清作业归属"
+                elif "测试数据包" in reason:
+                    advice = "测试样本包，保留归档供人工核实"
+                else:
+                    advice = "保留于 others 供人工核实"
+                lines.append(f"| `{orig_path}` | `{archive_dest}` | {status} | {reason} | `{cands_str}` | {advice} |")
             lines.append("")
 
         lines.extend([

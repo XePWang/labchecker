@@ -8,7 +8,7 @@ import shutil
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from checker.ai import HandwrittenReviewer
 from checker.config import WORK_DIR
@@ -29,6 +29,9 @@ IGNORED_PATTERNS = {
     ".git", ".vs", ".vscode", "Debug", "Release", "x64", "x86",
     "README.md", "readme.md", ".gitkeep"
 }
+
+# 保留目录 (不能将它们识别为学生目录或参与编译)
+RESERVED_DIRS = {"others", "__MACOSX"}
 
 
 def sanitize_filename(filename: str) -> str:
@@ -205,10 +208,11 @@ class SubmissionNormalizer:
         self.lab_root = lab_root
         self.submit_dir = lab_root / "submit"
         self.src_dir = lab_root / "src"
+        self.others_dir = self.src_dir / "others"
         self.extractor = SafeExtractor(WORK_DIR / f"{self.lab_name}_unpack")
 
         self.student_files: Dict[str, List[SubmissionFile]] = {}
-        self.unmatched_items: List[Dict[str, str]] = []
+        self.unmatched_items: List[Dict[str, Any]] = []
         self.ambiguous_items: List[Dict[str, Any]] = []
         # 学号到冲突描述的映射 (供 reporter 查询)
         self.conflict_students: Dict[str, str] = {}
@@ -234,7 +238,9 @@ class SubmissionNormalizer:
         for e in entries:
             if e.is_dir() and e.name not in IGNORED_PATTERNS and not e.name.startswith("."):
                 std, cands, _ = self.roster.match_student_from_text(e.name)
-                if not std and not cands:
+                clean_stem = re.sub(r"[\s_\-]", "", e.name)
+                is_batch_name = bool(re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE))
+                if not std and not cands and is_batch_name:
                     batch_dirs.append(e)
 
         # 2. 查找整批容器压缩包 (例如 实验一.zip)
@@ -242,7 +248,9 @@ class SubmissionNormalizer:
         for e in entries:
             if e.is_file() and e.suffix.lower() in KNOWN_ARCHIVE_EXTS:
                 std, cands, _ = self.roster.match_student_from_text(e.name)
-                if not std and not cands:
+                clean_stem = re.sub(r"[\s_\-]", "", e.stem)
+                is_batch_name = bool(re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE))
+                if not std and not cands and is_batch_name:
                     batch_zips.append(e)
 
         if batch_dirs:
@@ -276,6 +284,16 @@ class SubmissionNormalizer:
     def process_all_submissions(self) -> Dict[str, List[SubmissionFile]]:
         """执行全量处理流水线"""
         self.src_dir.mkdir(parents=True, exist_ok=True)
+        self.others_dir.mkdir(parents=True, exist_ok=True)
+        readme_path = self.others_dir / "README.md"
+        if not readme_path.exists():
+            readme_path.write_text(
+                "# 无法归属文件归档目录 (others)\n\n"
+                "本目录用于统一保存按学号分类时无法确定学生归属的提交文件与异常数据包，便于后续联系学生核实。\n"
+                "判题机在扫描与评测时将忽略此目录。\n",
+                encoding="utf-8"
+            )
+
         items = self._discover_submission_items()
         if not items:
             return {}
@@ -293,11 +311,8 @@ class SubmissionNormalizer:
             if len(candidates) > 1:
                 conflict_ids = [c.student_id for c in candidates]
                 conflict_msg = f"提交包同时包含多个候选学号: {conflict_ids} (原因: {reason})"
-                self.ambiguous_items.append({
-                    "path": str(entry),
-                    "candidates": conflict_ids,
-                    "reason": conflict_msg,
-                })
+                item_record = self._archive_unattributed_item(entry, reason=conflict_msg, candidates=conflict_ids)
+                self.ambiguous_items.append(item_record)
                 for cid in conflict_ids:
                     self.conflict_students[cid] = conflict_msg
                 continue
@@ -322,10 +337,8 @@ class SubmissionNormalizer:
                     unpack_dest.mkdir(parents=True, exist_ok=True)
                     success, msg, files = self.extractor.extract_archive(entry, unpack_dest, recursive=True)
                     if not success:
-                        self.unmatched_items.append({
-                            "path": str(entry),
-                            "reason": f"解压失败: {msg}",
-                        })
+                        item_record = self._archive_unattributed_item(entry, reason=f"解压失败: {msg}", candidates=[sid])
+                        self.unmatched_items.append(item_record)
                         continue
                     extracted_items = files
                     root_dir = unpack_dest
@@ -385,10 +398,12 @@ class SubmissionNormalizer:
                         if matched_std in students_without_image:
                             students_without_image.remove(matched_std)
                 else:
-                    self.unmatched_items.append({
-                        "path": str(entry),
-                        "reason": f"手写照片视觉识别未能唯一定位点名册学生: {ident_info.get('reason', '')}",
-                    })
+                    item_record = self._archive_unattributed_item(
+                        entry,
+                        reason=f"手写照片视觉识别未能唯一定位点名册学生: {ident_info.get('reason', '')}",
+                        candidates=[s.student_id for s in students_without_image] if len(students_without_image) <= 3 else []
+                    )
+                    self.unmatched_items.append(item_record)
             elif ext in KNOWN_ARCHIVE_EXTS:
                 # 检查是否为测试包
                 test_unpack = WORK_DIR / "test_inspect" / entry.stem
@@ -396,22 +411,103 @@ class SubmissionNormalizer:
                 ok, msg, test_files = self.extractor.extract_archive(entry, test_unpack, recursive=False)
                 c_files = [f for f in test_files if f.suffix.lower() in ALLOWED_SOURCE_EXTS]
                 if not c_files:
-                    self.unmatched_items.append({
-                        "path": str(entry),
-                        "reason": "测试数据包 (仅含 penguins-selected.csv，无学号且无 C 源码)",
-                    })
+                    item_record = self._archive_unattributed_item(
+                        entry,
+                        reason="测试数据包 (仅含 penguins-selected.csv，无学号且无 C 源码)",
+                    )
+                    self.unmatched_items.append(item_record)
                 else:
-                    self.unmatched_items.append({
-                        "path": str(entry),
-                        "reason": f"未匹配学生但含源程序: {[f.name for f in c_files]}",
-                    })
+                    item_record = self._archive_unattributed_item(
+                        entry,
+                        reason=f"未匹配学生但含源程序: {[f.name for f in c_files]}",
+                    )
+                    self.unmatched_items.append(item_record)
             else:
-                self.unmatched_items.append({
-                    "path": str(entry),
-                    "reason": f"未匹配点名册学生的文件: {entry.name}",
-                })
+                item_record = self._archive_unattributed_item(
+                    entry,
+                    reason=f"未匹配点名册学生的文件: {entry.name}",
+                )
+                self.unmatched_items.append(item_record)
 
         return self.student_files
+
+    def _archive_unattributed_item(
+        self,
+        entry: Path,
+        reason: str,
+        candidates: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        将无法确定学生归属的提交文件统一归档至 labX/src/others/。
+        保持原始 submit 目录内容只读不变，保留原文件名及必要的相对目录；同名文件不覆盖，完整记录来源。
+        """
+        self.others_dir.mkdir(parents=True, exist_ok=True)
+        candidates = candidates or []
+        archived_files: List[str] = []
+
+        if entry.is_file() and entry.suffix.lower() in KNOWN_ARCHIVE_EXTS:
+            # 压缩包：建立独立子目录 others/<archive_stem>/，保留原压缩包并解压全部内容
+            target_sub_dir = self.others_dir / entry.stem
+            if target_sub_dir.exists() and not any(target_sub_dir.iterdir()):
+                pass
+            elif target_sub_dir.exists():
+                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
+                target_sub_dir = self.others_dir / f"{entry.stem}_{source_tag}"
+
+            target_sub_dir.mkdir(parents=True, exist_ok=True)
+
+            # 1. 保存原始压缩包副本，确保来源可完整追溯
+            dest_archive = target_sub_dir / entry.name
+            try:
+                if not dest_archive.exists() or dest_archive.stat().st_size != entry.stat().st_size:
+                    shutil.copy2(entry, dest_archive)
+                archived_files.append(dest_archive.name)
+            except Exception:
+                pass
+
+            # 2. 安全解压内部全部文件，保持相对路径
+            success, msg, files = self.extractor.extract_archive(entry, target_sub_dir, recursive=True)
+            if success:
+                for f in files:
+                    try:
+                        rel = str(f.relative_to(target_sub_dir))
+                        archived_files.append(rel)
+                    except Exception:
+                        archived_files.append(f.name)
+
+            archive_dest_str = f"{self.lab_name}/src/others/{target_sub_dir.name}/"
+        elif entry.is_dir():
+            target_sub_dir = self.others_dir / entry.name
+            if target_sub_dir.exists():
+                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
+                target_sub_dir = self.others_dir / f"{entry.name}_{source_tag}"
+            shutil.copytree(entry, target_sub_dir, dirs_exist_ok=True)
+            archive_dest_str = f"{self.lab_name}/src/others/{target_sub_dir.name}/"
+            for p in target_sub_dir.rglob("*"):
+                if p.is_file():
+                    archived_files.append(str(p.relative_to(target_sub_dir)))
+        else:
+            # 独立单文件 (如散放的照片、源码或未识别文件)
+            target_file = self.others_dir / entry.name
+            if target_file.exists() and target_file.stat().st_size != entry.stat().st_size:
+                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
+                target_file = self.others_dir / f"{entry.stem}_{source_tag}{entry.suffix}"
+            try:
+                shutil.copy2(entry, target_file)
+                archived_files.append(target_file.name)
+            except Exception:
+                pass
+            archive_dest_str = f"{self.lab_name}/src/others/{target_file.name}"
+
+        return {
+            "path": str(entry),
+            "archive_dest": archive_dest_str,
+            "source_archive": entry.name,
+            "reason": reason,
+            "candidates": candidates,
+            "status": "无法归属、待复核",
+            "archived_files": archived_files,
+        }
 
     def _classify_and_stage_file(
         self,

@@ -1255,6 +1255,58 @@ int main() {
             # 唯独标记了 needs_review 的项才为“是”
             self.assertEqual(item_map["演草纸学生身份一致性"], "是")
 
+    def test_32_others_archive_unattributed_submissions(self):
+        """测试 32: 无法确定学生归属的提交文件安全隔离归档至 labX/src/others/，同名文件隔离不覆盖，报告生成审计表"""
+        s1 = Student(seq=1, student_id="2026110001", name="已知学生", class_id="260101")
+        roster = RosterManager()
+        roster.students = [s1]
+        roster.by_id = {s1.student_id: s1}
+        roster.by_name = {s1.name: [s1]}
+
+        lab_dir = self.test_work / "lab_others_test"
+        submit_dir = lab_dir / "submit"
+        src_dir = lab_dir / "src"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        # 制作两个同名文件的未知提交 zip
+        zip1_path = submit_dir / "unknown_pkg1.zip"
+        with zipfile.ZipFile(zip1_path, "w") as z:
+            z.writestr("test_data.csv", "col1,col2\n1,2\n")
+        zip2_path = submit_dir / "unknown_pkg2.zip"
+        with zipfile.ZipFile(zip2_path, "w") as z:
+            z.writestr("test_data.csv", "colA,colB\n3,4\n")
+
+        normalizer = SubmissionNormalizer(roster, "lab1", lab_dir)
+        student_files_map = normalizer.process_all_submissions()
+
+        # 1. 验证已知学生无归属文件，others 目录存在
+        self.assertNotIn("others", student_files_map)
+        others_dir = src_dir / "others"
+        self.assertTrue(others_dir.exists())
+
+        # 2. 验证两份同名文件各自归档于对应 stem 目录，未发生覆盖
+        file1 = others_dir / "unknown_pkg1" / "test_data.csv"
+        file2 = others_dir / "unknown_pkg2" / "test_data.csv"
+        self.assertTrue(file1.exists())
+        self.assertTrue(file2.exists())
+        self.assertEqual(file1.read_text().strip(), "col1,col2\n1,2")
+        self.assertEqual(file2.read_text().strip(), "colA,colB\n3,4")
+
+        # 3. 验证 reporter 生成的报告包含统一归档位置与“无法归属、待复核”状态
+        out_dir = lab_dir / "output"
+        reporter = LabReporter("lab1", out_dir)
+        grade = StudentGrade(student=s1, max_score=5.0)
+        report_paths = reporter.generate_all_reports(
+            roster_students=[s1],
+            grades={s1.student_id: grade},
+            unmatched_items=normalizer.unmatched_items,
+        )
+        report_content = Path(report_paths["summary_md"]).read_text(encoding="utf-8")
+        self.assertIn("lab1/src/others/", report_content)
+        self.assertIn("无法归属、待复核", report_content)
+        self.assertIn("unknown_pkg1", report_content)
+        self.assertIn("unknown_pkg2", report_content)
+
 
 if __name__ == "__main__":
     unittest.main()
