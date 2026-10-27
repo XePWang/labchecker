@@ -16,6 +16,7 @@ from checker.labs.base import BaseLabJudge
 from checker.models import (
     CheckItem,
     CompileResult,
+    CompileTask,
     ProblemResult,
     Student,
     StudentGrade,
@@ -47,12 +48,51 @@ class Lab1Judge(BaseLabJudge):
             ("0 50.0\n", "Centigrade", 10.00),
         ]
 
+    def collect_compile_tasks(
+        self,
+        student: Student,
+        files: List[SubmissionFile],
+        build_dir: Path,
+    ) -> List[CompileTask]:
+        """收集 Lab 1 该学生所有需要编译的代码候选任务"""
+        tasks: List[CompileTask] = []
+        student_build_dir = build_dir / student.student_id
+
+        p1_2_sources = [f.path for f in files if f.matched_problem == "1-2" and f.file_type in {"c_source", "cpp_source"}]
+        for cand_idx, cand_src in enumerate(p1_2_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="1-2",
+                    cand_idx=cand_idx,
+                    binary_name=f"lab1_2_cand_{cand_idx}",
+                    src_path=cand_src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        p1_3_sources = [f.path for f in files if f.matched_problem == "1-3" and f.file_type in {"c_source", "cpp_source"}]
+        for cand_idx, cand_src in enumerate(p1_3_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="1-3",
+                    cand_idx=cand_idx,
+                    binary_name=f"lab1_3_cand_{cand_idx}",
+                    src_path=cand_src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        return tasks
+
     def grade_student(
         self,
         student: Student,
         files: List[SubmissionFile],
         build_dir: Path,
         mock_ai: bool = False,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> StudentGrade:
         """评测单个学生的 Lab 1"""
         student_build_dir = build_dir / student.student_id
@@ -88,6 +128,7 @@ class Lab1Judge(BaseLabJudge):
             projects=p1_2_projects,
             links=p1_2_links,
             all_student_files=files,
+            precompiled=precompiled,
         )
         grade.problem_results["1-2"] = res1_2
 
@@ -99,6 +140,7 @@ class Lab1Judge(BaseLabJudge):
             mock_ai=mock_ai,
             projects=p1_3_projects,
             links=p1_3_links,
+            precompiled=precompiled,
         )
         grade.problem_results["1-3"] = res1_3
 
@@ -271,6 +313,7 @@ class Lab1Judge(BaseLabJudge):
         projects: Optional[List[Path]] = None,
         links: Optional[List[Path]] = None,
         all_student_files: Optional[List[SubmissionFile]] = None,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
         """评测 Lab 1-2：代码运算 (1.5分) + 手写验算 (1.5分)"""
         prob = ProblemResult(problem_id="1-2", score=0.0, max_score=3.0, source_files=sources)
@@ -329,7 +372,10 @@ class Lab1Judge(BaseLabJudge):
                 c_code_x = int(m_x.group(1)) if m_x else None
                 c_code_y = int(m_y.group(1)) if m_y else None
 
-                c_compile = self.compiler.compile(cand_src, build_dir, f"lab1_2_cand_{cand_idx}")
+                if precompiled and (student.student_id, "1-2", cand_idx) in precompiled:
+                    c_compile = precompiled[(student.student_id, "1-2", cand_idx)]
+                else:
+                    c_compile = self.compiler.compile(cand_src, build_dir, f"lab1_2_cand_{cand_idx}")
                 c_notes = []
                 c_reviews = []
                 c_needs_review = False
@@ -1121,6 +1167,7 @@ class Lab1Judge(BaseLabJudge):
         mock_ai: bool,
         projects: Optional[List[Path]] = None,
         links: Optional[List[Path]] = None,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
         """评测 Lab 1-3：温度转换 (2.0分)"""
         prob = ProblemResult(problem_id="1-3", score=0.0, max_score=2.0, source_files=sources)
@@ -1154,7 +1201,10 @@ class Lab1Judge(BaseLabJudge):
             cand_evaluations = []
             for cand_idx, cand_src in enumerate(sources):
                 c_text = cand_src.read_text(encoding="utf-8", errors="replace") if cand_src.exists() else ""
-                c_compile = self.compiler.compile(cand_src, build_dir, f"lab1_3_cand_{cand_idx}")
+                if precompiled and (student.student_id, "1-3", cand_idx) in precompiled:
+                    c_compile = precompiled[(student.student_id, "1-3", cand_idx)]
+                else:
+                    c_compile = self.compiler.compile(cand_src, build_dir, f"lab1_3_cand_{cand_idx}")
                 c_results = []
                 c_outputs = []
                 c_notes = []

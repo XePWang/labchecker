@@ -45,6 +45,19 @@ class CompileResult:
 
 
 @dataclass
+class CompileTask:
+    """公共编译任务单元 (学生 × 题号 × 源码候选)"""
+    student_id: str
+    problem_id: str                          # 如 "1-2", "1-3", "2-1"
+    cand_idx: int                            # 源码候选序号，从 0 开始
+    binary_name: str                         # 如 "lab1_2_cand_0"
+    src_path: Path                           # 源码文件路径
+    build_dir: Path                          # 产物输出目录 (如 build/<student_id>)
+    extra_sources: Optional[List[Path]] = None
+    include_dirs: Optional[List[Path]] = None
+
+
+@dataclass
 class TestCaseResult:
     """单个测试用例评测详情"""
     case_id: str

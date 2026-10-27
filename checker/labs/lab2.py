@@ -17,6 +17,7 @@ from checker.compiler import ProjectCompiler
 from checker.labs.base import BaseLabJudge
 from checker.models import (
     CompileResult,
+    CompileTask,
     ProblemResult,
     Student,
     StudentGrade,
@@ -49,12 +50,77 @@ class Lab2Judge(BaseLabJudge):
             ("24\n", "invalid", ["invalid", "error", "无效", "错误", "不合法"]),
         ]
 
+    def collect_compile_tasks(
+        self,
+        student: Student,
+        files: List[SubmissionFile],
+        build_dir: Path,
+    ) -> List[CompileTask]:
+        """收集 Lab 2 该学生所有题目的源码编译任务"""
+        tasks: List[CompileTask] = []
+        student_build_dir = build_dir / student.student_id
+
+        p2_1_sources = [f.path for f in files if f.matched_problem == "2-1" and f.file_type in {"c_source", "cpp_source"}]
+        for cand_idx, cand_src in enumerate(p2_1_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="2-1",
+                    cand_idx=cand_idx,
+                    binary_name=f"lab2_1_cand_{cand_idx}",
+                    src_path=cand_src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        p2_2_sources = [f.path for f in files if f.matched_problem == "2-2" and f.file_type in {"c_source", "cpp_source"}]
+        for cand_idx, cand_src in enumerate(p2_2_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="2-2",
+                    cand_idx=cand_idx,
+                    binary_name=f"lab2_2_cand_{cand_idx}",
+                    src_path=cand_src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        p2_3_sources = [f.path for f in files if f.matched_problem == "2-3" and f.file_type in {"c_source", "cpp_source"}]
+        for idx, src in enumerate(p2_3_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="2-3",
+                    cand_idx=idx,
+                    binary_name=f"lab2_3_cand_{idx}",
+                    src_path=src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        p2_4_sources = [f.path for f in files if f.matched_problem == "2-4" and f.file_type in {"c_source", "cpp_source"}]
+        for idx, src in enumerate(p2_4_sources):
+            tasks.append(
+                CompileTask(
+                    student_id=student.student_id,
+                    problem_id="2-4",
+                    cand_idx=idx,
+                    binary_name=f"lab2_4_cand_{idx}",
+                    src_path=src,
+                    build_dir=student_build_dir,
+                )
+            )
+
+        return tasks
+
     def grade_student(
         self,
         student: Student,
         files: List[SubmissionFile],
         build_dir: Path,
         mock_ai: bool = False,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> StudentGrade:
         """评测单个学生的 Lab 2"""
         student_build_dir = build_dir / student.student_id
@@ -81,18 +147,18 @@ class Lab2Judge(BaseLabJudge):
             )
 
         # 2. 评测 Lab 2-1 (2.0分)
-        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai)
+        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled)
         grade.problem_results["2-1"] = res2_1
 
         # 3. 评测 Lab 2-2 (3.0分)
-        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai)
+        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai, precompiled=precompiled)
         grade.problem_results["2-2"] = res2_2
 
         # 4. 评测选做题 Lab 2-3 与 2-4 (独立记录完成情况)
         if p2_3_sources:
-            grade.optional_results["2-3"] = self._grade_lab2_3(student, p2_3_sources, student_build_dir)
+            grade.optional_results["2-3"] = self._grade_lab2_3(student, p2_3_sources, student_build_dir, precompiled=precompiled)
         if p2_4_sources:
-            grade.optional_results["2-4"] = self._grade_lab2_4(student, p2_4_sources, student_build_dir)
+            grade.optional_results["2-4"] = self._grade_lab2_4(student, p2_4_sources, student_build_dir, precompiled=precompiled)
 
         # 汇总总分
         grade.total_score = round(res2_1.score + res2_2.score, 2)
@@ -126,6 +192,7 @@ class Lab2Judge(BaseLabJudge):
         sources: List[Path],
         build_dir: Path,
         mock_ai: bool,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
         """评测 Lab 2-1：时间段问候 (2.0分)"""
         prob = ProblemResult(problem_id="2-1", score=0.0, max_score=2.0, source_files=sources)
@@ -140,7 +207,10 @@ class Lab2Judge(BaseLabJudge):
         cand_evaluations = []
         for cand_idx, cand_src in enumerate(sources):
             c_text = cand_src.read_text(encoding="utf-8", errors="ignore")
-            c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_1_cand_{cand_idx}")
+            if precompiled and (student.student_id, "2-1", cand_idx) in precompiled:
+                c_compile = precompiled[(student.student_id, "2-1", cand_idx)]
+            else:
+                c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_1_cand_{cand_idx}")
             c_results = []
             c_notes = []
             c_reviews = []
@@ -277,6 +347,7 @@ class Lab2Judge(BaseLabJudge):
         sources: List[Path],
         build_dir: Path,
         mock_ai: bool,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
         """
         评测 Lab 2-2：字母金字塔 (3.0分)
@@ -303,7 +374,10 @@ class Lab2Judge(BaseLabJudge):
         # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
         cand_evaluations = []
         for cand_idx, cand_src in enumerate(sources):
-            c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_2_cand_{cand_idx}")
+            if precompiled and (student.student_id, "2-2", cand_idx) in precompiled:
+                c_compile = precompiled[(student.student_id, "2-2", cand_idx)]
+            else:
+                c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_2_cand_{cand_idx}")
             c_results = []
             c_notes = []
             passed_cases = 0
@@ -438,14 +512,23 @@ class Lab2Judge(BaseLabJudge):
             prob.notes.append(f"检测到 {len(sources)} 份 2-2 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/3.00)")
         return prob
 
-    def _grade_lab2_3(self, student: Student, sources: List[Path], build_dir: Path) -> ProblemResult:
+    def _grade_lab2_3(
+        self,
+        student: Student,
+        sources: List[Path],
+        build_dir: Path,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
+    ) -> ProblemResult:
         """选做题 Lab 2-3：回文素数"""
         prob = ProblemResult(problem_id="2-3", score=0.0, max_score=0.0, source_files=sources)
         best_status = "compile_error"
         best_note = "选做题2-3未能编译通过"
         best_c_res = None
         for idx, src in enumerate(sources):
-            c_res = self.compiler.compile(src, build_dir, f"lab2_3_cand_{idx}")
+            if precompiled and (student.student_id, "2-3", idx) in precompiled:
+                c_res = precompiled[(student.student_id, "2-3", idx)]
+            else:
+                c_res = self.compiler.compile(src, build_dir, f"lab2_3_cand_{idx}")
             if not best_c_res:
                 best_c_res = c_res
             if c_res.success:
@@ -465,14 +548,23 @@ class Lab2Judge(BaseLabJudge):
         prob.compile_result = best_c_res
         return prob
 
-    def _grade_lab2_4(self, student: Student, sources: List[Path], build_dir: Path) -> ProblemResult:
+    def _grade_lab2_4(
+        self,
+        student: Student,
+        sources: List[Path],
+        build_dir: Path,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
+    ) -> ProblemResult:
         """选做题 Lab 2-4：4:2 优先编码器"""
         prob = ProblemResult(problem_id="2-4", score=0.0, max_score=0.0, source_files=sources)
         best_status = "compile_error"
         best_note = "选做题2-4未能编译通过"
         best_c_res = None
         for idx, src in enumerate(sources):
-            c_res = self.compiler.compile(src, build_dir, f"lab2_4_cand_{idx}")
+            if precompiled and (student.student_id, "2-4", idx) in precompiled:
+                c_res = precompiled[(student.student_id, "2-4", idx)]
+            else:
+                c_res = self.compiler.compile(src, build_dir, f"lab2_4_cand_{idx}")
             if not best_c_res:
                 best_c_res = c_res
             if c_res.success:

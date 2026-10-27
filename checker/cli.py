@@ -5,6 +5,7 @@ checker.cli
 import argparse
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Dict
 
@@ -24,8 +25,10 @@ def run_lab(
     mock_ai: bool = False,
     single_student_id: str = "",
     clean: bool = False,
+    compile_workers: int = 32,
 ) -> int:
     """运行指定实验的完整判题流水线"""
+    pipeline_start_time = time.time()
     lab_name = lab_id.lower()
     lab_root = PROJECT_ROOT / lab_name
 
@@ -108,6 +111,22 @@ def run_lab(
         if ai_tasks:
             HandwrittenReviewer.precompute_reviews(ai_tasks, max_workers=4)
 
+    # 4.1 公共并行编译阶段 (Parallel Compilation)
+    print(f"[*] 正在收集待编译源码候选并启动公共编译阶段 (并发 workers: {compile_workers})...")
+    batch_compile_start = time.time()
+    compile_tasks = []
+    for s in students_to_grade:
+        if s.student_id in normalizer.conflict_students:
+            continue
+        s_files = student_files_map.get(s.student_id, [])
+        compile_tasks.extend(judge.collect_compile_tasks(s, s_files, build_dir))
+
+    precompiled_results = judge.compiler.compile_batch(compile_tasks, max_workers=compile_workers)
+    batch_compile_duration = time.time() - batch_compile_start
+    print(f"[+] 编译阶段完成: 共完成 {len(compile_tasks)} 个源码候选编译，耗时 {batch_compile_duration:.2f} 秒")
+
+    # 4.2 串行运行判分阶段 (Serial Grading & Deductions & Comments)
+    grade_start_time = time.time()
     print(f"[*] 开始自动化评测 (共 {len(students_to_grade)} 人, Mock AI: {mock_ai})...")
     for idx, student in enumerate(students_to_grade, 1):
         if student.student_id in normalizer.conflict_students:
@@ -128,7 +147,7 @@ def run_lab(
             grades[student.student_id] = grade
         else:
             files = student_files_map.get(student.student_id, [])
-            grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai)
+            grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai, precompiled=precompiled_results)
             if student.student_id in getattr(normalizer, "inferred_students", {}):
                 inf_reason = normalizer.inferred_students[student.student_id]
                 grade.needs_review = True
@@ -193,6 +212,12 @@ def run_lab(
         if "roster_xlsx" in report_paths:
             print(f"  - 官方模板Excel: {report_paths['roster_xlsx']}")
 
+    grade_duration = time.time() - grade_start_time
+    total_pipeline_duration = time.time() - pipeline_start_time
+    print(f"\n[*] 运行阶段耗时汇总:")
+    print(f"  - 编译阶段耗时: {batch_compile_duration:.2f} 秒 (并发 workers: {compile_workers}, 源码任务数: {len(compile_tasks)})")
+    print(f"  - 串行评测耗时: {grade_duration:.2f} 秒")
+    print(f"  - 全批流水线总耗时: {total_pipeline_duration:.2f} 秒")
     print(f"==========================================")
     print(f"🎉 {lab_name.upper()} 评测完成！\n")
     return 0
@@ -235,6 +260,12 @@ def main():
         default="",
         help="仅针对单个学号执行判题",
     )
+    parser.add_argument(
+        "--compile-workers",
+        type=int,
+        default=32,
+        help="公共编译阶段的并发工作线程数 (默认 32，设为 1 为串行编译)",
+    )
 
     args = parser.parse_args()
 
@@ -252,6 +283,7 @@ def main():
             mock_ai=args.mock_ai,
             single_student_id=args.student_id,
             clean=args.clean,
+            compile_workers=args.compile_workers,
         )
         if ret != 0:
             exit_code = ret

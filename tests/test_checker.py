@@ -1307,6 +1307,53 @@ int main() {
         self.assertIn("unknown_pkg1", report_content)
         self.assertIn("unknown_pkg2", report_content)
 
+    def test_33_parallel_vs_serial_compilation_equivalence(self):
+        """测试 33: 并行与串行公共编译等价性，多候选同名 main.c 兼容产物独立无覆盖"""
+        from checker.compiler import ProjectCompiler
+        from checker.models import CompileTask
+
+        work = self.test_work / "test_compile_workers"
+        work.mkdir(parents=True, exist_ok=True)
+        compiler = ProjectCompiler()
+
+        # 构造需要 Windows 兼容转换的两个同名 main.c
+        src_dir1 = work / "cand1"
+        src_dir2 = work / "cand2"
+        src_dir1.mkdir(parents=True, exist_ok=True)
+        src_dir2.mkdir(parents=True, exist_ok=True)
+
+        main1 = src_dir1 / "main.c"
+        main1.write_text('#include <stdio.h>\n#include <windows.h>\nint main(){printf("cand1");return 0;}', encoding="utf-8")
+        main2 = src_dir2 / "main.c"
+        main2.write_text('#include <stdio.h>\n#include <windows.h>\nint main(){printf("cand2");return 0;}', encoding="utf-8")
+
+        build_dir = work / "build"
+        task1 = CompileTask("2026110001", "1-2", 0, "lab1_2_cand_0", main1, build_dir)
+        task2 = CompileTask("2026110001", "1-2", 1, "lab1_2_cand_1", main2, build_dir)
+
+        # 1. 串行编译 (workers = 1)
+        res_serial = compiler.compile_batch([task1, task2], max_workers=1)
+
+        # 2. 检查生成的 compat 副本是否独立 (包含 problem_id 前缀)
+        compat1 = build_dir / "lab1_2_cand_0_main_compat.c"
+        compat2 = build_dir / "lab1_2_cand_1_main_compat.c"
+        self.assertTrue(compat1.exists())
+        self.assertTrue(compat2.exists())
+        self.assertIn("cand1", compat1.read_text())
+        self.assertIn("cand2", compat2.read_text())
+
+        # 3. 并行编译 (workers = 4)
+        shutil.rmtree(build_dir)
+        res_parallel = compiler.compile_batch([task1, task2], max_workers=4)
+
+        # 4. 对比结果一致性
+        self.assertEqual(res_serial.keys(), res_parallel.keys())
+        for k in res_serial:
+            self.assertEqual(res_serial[k].success, res_parallel[k].success)
+            self.assertEqual(res_serial[k].exit_code, res_parallel[k].exit_code)
+            self.assertEqual(res_serial[k].binary_path.name, res_parallel[k].binary_path.name)
+            self.assertEqual(res_serial[k].compat_applied, res_parallel[k].compat_applied)
+
 
 if __name__ == "__main__":
     unittest.main()

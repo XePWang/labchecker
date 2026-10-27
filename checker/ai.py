@@ -623,6 +623,20 @@ class SemanticAmbiguityReviewer:
                 "review_reason": "",
             }
 
+        hasher = hashlib.md5()
+        hasher.update(problem_id.encode("utf-8"))
+        hasher.update(student_id.encode("utf-8"))
+        hasher.update(input_data.encode("utf-8"))
+        hasher.update(actual_output.encode("utf-8", errors="ignore"))
+        hasher.update(source_code.encode("utf-8", errors="ignore"))
+        cache_key = f"semantic_{hasher.hexdigest()}"
+
+        cache = _load_ai_cache()
+        if cache_key in cache:
+            cached_res = cache[cache_key]
+            if not cached_res.get("is_pending"):
+                return cached_res
+
         prompt = f"""
 你是一名大一《程序设计思维与实践》课程的复核评审 Agent。
 某学生在题目 {problem_id} 的黑盒测试中未完全精确命中预期格式，请你判定其属于以下哪一种情况：
@@ -688,6 +702,10 @@ task_id 必须为 "{expected_task_id}"，suggested_score 范围 0.0 ~ {max_score
             raw_sc = float(res.get("suggested_score", 0.0))
             res["suggested_score"] = max(0.0, min(max_score, raw_sc))
             res["is_pending"] = False
+            if not mock_mode:
+                cache = _load_ai_cache()
+                cache[cache_key] = res
+                _save_ai_cache(cache)
         except (ValueError, TypeError):
             res["suggested_score"] = 0.0
             res["is_pending"] = True

@@ -2,16 +2,17 @@
 checker.compiler
 GCC/G++ 编译引擎与 Windows 环境差异自动化兼容转换模块
 """
+import concurrent.futures
 import os
 import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from checker.config import C_STANDARD, CXX_STANDARD, GCC_PATH, GXX_PATH
-from checker.models import CompileResult
+from checker.models import CompileResult, CompileTask
 
 # 编译器通用参数与链接选项 (确保 -lm 放置于末尾以满足 GCC 链接符号解析规则)
 COMPILER_FLAGS = ["-O2", "-Wall"]
@@ -305,7 +306,8 @@ class ProjectCompiler:
             compat_code, syntax_reasons = generate_compat_source(decoded_text)
             compat_reasons.extend(syntax_reasons)
 
-            compat_src_path = build_dir / f"{src_path.stem}_compat{src_path.suffix}"
+            # 兼容性副本命名: 使用 problem_id 前缀确保独立，防止多候选或不同题目 main.c 互相覆盖
+            compat_src_path = build_dir / f"{problem_id}_{src_path.stem}_compat{src_path.suffix}"
             compat_src_path.write_text(compat_code, encoding="utf-8")
 
             compat_sources = [compat_src_path] + (extra_sources or [])
@@ -397,3 +399,53 @@ class ProjectCompiler:
                 f.write(f"=== 标准输出 ===\n{stdout}\n\n")
             if stderr:
                 f.write(f"=== 标准错误 ===\n{stderr}\n\n")
+
+    def compile_batch(
+        self,
+        tasks: List[CompileTask],
+        max_workers: int = 32,
+    ) -> Dict[Tuple[str, str, int], CompileResult]:
+        """
+        公共批量并发编译执行器。
+        使用有并发上限的任务池调用现有编译器。
+        保留原有编译参数、Windows 兼容处理、超时和日志机制。
+        每个“学生 × 题号 × 源码候选”产物与临时文件独立，避免 main.c 互相覆盖。
+        单个候选编译失败或超时，不影响其他候选和学生继续处理。
+        """
+        results: Dict[Tuple[str, str, int], CompileResult] = {}
+        if not tasks:
+            return results
+
+        def _execute_task(task: CompileTask) -> Tuple[CompileTask, CompileResult]:
+            try:
+                res = self.compile(
+                    src_path=task.src_path,
+                    build_dir=task.build_dir,
+                    problem_id=task.binary_name,
+                    extra_sources=task.extra_sources,
+                    include_dirs=task.include_dirs,
+                )
+                return task, res
+            except Exception as e:
+                err_res = CompileResult(
+                    success=False,
+                    command=[],
+                    stderr=f"编译调度异常: {str(e)}",
+                    exit_code=-1,
+                    duration_ms=0.0,
+                )
+                return task, err_res
+
+        workers = max(1, max_workers)
+        if workers == 1:
+            for task in tasks:
+                _, res = _execute_task(task)
+                results[(task.student_id, task.problem_id, task.cand_idx)] = res
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_task = {executor.submit(_execute_task, t): t for t in tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    task, res = future.result()
+                    results[(task.student_id, task.problem_id, task.cand_idx)] = res
+
+        return results

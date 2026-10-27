@@ -320,7 +320,7 @@ class LabReporter:
 
                 # 8. 待复核事项
                 if grade and grade.needs_review:
-                    review_str = "; ".join(set(grade.review_reasons)) if grade.review_reasons else "待人工复核确认"
+                    review_str = "; ".join(sorted(list(set(grade.review_reasons)))) if grade.review_reasons else "待人工复核确认"
                 else:
                     review_str = "无"
 
@@ -470,7 +470,7 @@ class LabReporter:
             lines.append("| 学号 | 姓名 | 班级 | 当前建议分值 | 待复核疑点 / 证据说明 | 处理建议 |")
             lines.append("| :--- | :--- | :--- | :---: | :--- | :--- |")
             for std, gr in needs_review_students:
-                reasons = "<br>".join(set(gr.review_reasons)) if gr.review_reasons else "待人工复核"
+                reasons = "<br>".join(sorted(list(set(gr.review_reasons)))) if gr.review_reasons else "待人工复核"
                 sc_str = "成绩待定" if (gr.is_pending or gr.status in {"ambiguous", "conflict"}) else f"{gr.total_score:.2f}分"
                 advice = "现场核验源码与推导"
                 if any("未写学号姓名" in r for r in gr.review_reasons):

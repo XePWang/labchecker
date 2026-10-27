@@ -4,9 +4,9 @@ checker.labs.base
 """
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from checker.models import ProblemResult, Student, StudentGrade, SubmissionFile
+from checker.models import CompileResult, CompileTask, ProblemResult, Student, StudentGrade, SubmissionFile
 
 
 class BaseLabJudge(ABC):
@@ -17,12 +17,23 @@ class BaseLabJudge(ABC):
         self.max_score = max_score
 
     @abstractmethod
+    def collect_compile_tasks(
+        self,
+        student: Student,
+        files: List[SubmissionFile],
+        build_dir: Path,
+    ) -> List[CompileTask]:
+        """收集单个学生所有题目的源码编译任务"""
+        pass
+
+    @abstractmethod
     def grade_student(
         self,
         student: Student,
         files: List[SubmissionFile],
         build_dir: Path,
         mock_ai: bool = False,
+        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> StudentGrade:
         """对单个学生评测本实验所有题目并返回成绩单"""
         pass
