@@ -251,7 +251,14 @@ class ProjectCompiler:
 
         start_time = time.time()
         try:
-            res = subprocess.run(wrapped_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+            res = subprocess.run(
+                wrapped_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                timeout=20,
+            )
             duration_ms = (time.time() - start_time) * 1000
 
             if res.returncode == 0 and bin_path.exists():
@@ -314,7 +321,12 @@ class ProjectCompiler:
             start_time = time.time()
             try:
                 compat_res = subprocess.run(
-                    wrapped_compat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
+                    wrapped_compat_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                    timeout=20,
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 success = compat_res.returncode == 0 and bin_path.exists()
