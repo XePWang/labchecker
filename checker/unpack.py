@@ -224,65 +224,129 @@ class SubmissionNormalizer:
         # 学号到视觉推断审计原因的映射
         self.inferred_students: Dict[str, str] = {}
 
+    def _is_container_dir(self, d: Path) -> bool:
+        """检查目录是否为包裹了学生提交的容器目录"""
+        if d.name in IGNORED_PATTERNS or d.name.startswith("."):
+            return False
+        # 如果目录名本身直接精确匹配唯一学生，则优先视为该学生的独立提交目录
+        std, cands, _ = self.roster.match_student_from_text(d.name)
+        if std and len(cands) == 1:
+            return False
+
+        # 目录名符合明显批次特征 (实验一, lab1, batch, etc.)
+        clean_stem = re.sub(r"[\s_\-]", "", d.name)
+        if re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE):
+            return True
+
+        # 检查内部是否包含可归属的学生提交 (扫描子文件/子目录)
+        try:
+            for p in d.rglob("*"):
+                if p.name.startswith(".") or p.name in IGNORED_PATTERNS:
+                    continue
+                child_std, child_cands, _ = self.roster.match_student_from_text(p.name)
+                if child_std or child_cands:
+                    return True
+                if p.is_file() and p.suffix.lower() in KNOWN_ARCHIVE_EXTS:
+                    if self.roster.match_student_from_text(p.stem)[0]:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _is_container_archive(self, archive_path: Path) -> bool:
+        """检查压缩包是否为总包容器"""
+        std, cands, _ = self.roster.match_student_from_text(archive_path.name)
+        if std and len(cands) == 1:
+            return False
+
+        clean_stem = re.sub(r"[\s_\-]", "", archive_path.stem)
+        if re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE):
+            return True
+
+        # 检查压缩包内文件名列表是否包含可归属学生
+        try:
+            if zipfile.is_zipfile(archive_path):
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    for name in zf.namelist():
+                        fname = Path(name).name
+                        if fname and not fname.startswith(".") and fname not in IGNORED_PATTERNS:
+                            c_std, c_cands, _ = self.roster.match_student_from_text(fname)
+                            if c_std or c_cands:
+                                return True
+            elif tarfile.is_tarfile(archive_path):
+                with tarfile.open(archive_path, 'r:*') as tf:
+                    for name in tf.getnames():
+                        fname = Path(name).name
+                        if fname and not fname.startswith(".") and fname not in IGNORED_PATTERNS:
+                            c_std, c_cands, _ = self.roster.match_student_from_text(fname)
+                            if c_std or c_cands:
+                                return True
+        except Exception:
+            pass
+        return False
+
     def _discover_submission_items(self) -> List[Path]:
         """
         发现待评测的提交项。
         支持：
         1. 直接散落在 labX/submit/ 下的学生提交；
-        2. 平台导出的总包文件夹 (如 labX/submit/实验一/)；
-        3. 平台导出的总包压缩包 (如 labX/submit/实验一.zip)，解压至 .work/labX_container/ 后处理。
+        2. 包含学生提交的各级总包/批次文件夹 (如 实验一/、学生作业/)；
+        3. 平台导出的总包压缩包 (如 实验一.zip)，解压至 .work/labX_container/ 后展开。
         """
         if not self.submit_dir.exists():
             return []
 
         entries = sorted(list(self.submit_dir.iterdir()))
         items: List[Path] = []
+        handled_container_stems: Set[str] = set()
 
-        # 1. 查找是否存在已解压的整批容器目录 (例如 实验一/ 或 lab1/)
-        batch_dirs = []
+        def collect_from_dir(d: Path):
+            for sub_item in sorted(list(d.iterdir())):
+                if sub_item.name.startswith(".") or sub_item.name in IGNORED_PATTERNS:
+                    continue
+                if sub_item.is_dir() and self._is_container_dir(sub_item):
+                    collect_from_dir(sub_item)
+                else:
+                    items.append(sub_item)
+
+        # 1. 优先扫描并展开容器目录
+        container_dirs = []
+        regular_entries = []
         for e in entries:
-            if e.is_dir() and e.name not in IGNORED_PATTERNS and not e.name.startswith("."):
-                std, cands, _ = self.roster.match_student_from_text(e.name)
-                clean_stem = re.sub(r"[\s_\-]", "", e.name)
-                is_batch_name = bool(re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE))
-                if not std and not cands and is_batch_name:
-                    batch_dirs.append(e)
+            if e.name.startswith(".") or e.name in IGNORED_PATTERNS:
+                continue
+            if e.is_dir() and self._is_container_dir(e):
+                container_dirs.append(e)
+                clean_tag = re.sub(r"[\s_\-]", "", e.name).lower()
+                handled_container_stems.add(clean_tag)
+            else:
+                regular_entries.append(e)
 
-        # 2. 查找整批容器压缩包 (例如 实验一.zip)
-        batch_zips = []
-        for e in entries:
-            if e.is_file() and e.suffix.lower() in KNOWN_ARCHIVE_EXTS:
-                std, cands, _ = self.roster.match_student_from_text(e.name)
-                clean_stem = re.sub(r"[\s_\-]", "", e.stem)
-                is_batch_name = bool(re.search(rf"^({self.lab_name}|实验[一二三四五六七八九十0-9]+|batch|container|总包)$", clean_stem, re.IGNORECASE))
-                if not std and not cands and is_batch_name:
-                    batch_zips.append(e)
+        for cdir in container_dirs:
+            collect_from_dir(cdir)
 
-        if batch_dirs:
-            # 优先使用已存在的解压容器目录
-            for bdir in batch_dirs:
-                for sub_item in sorted(list(bdir.iterdir())):
-                    if sub_item.name not in IGNORED_PATTERNS and not sub_item.name.startswith("."):
-                        items.append(sub_item)
-        elif batch_zips:
-            # 安全解压总包容器至 .work/
-            for bzip in batch_zips:
-                container_dest = WORK_DIR / f"{self.lab_name}_container" / bzip.stem
-                container_dest.mkdir(parents=True, exist_ok=True)
-                existing = [p for p in container_dest.iterdir() if p.name not in IGNORED_PATTERNS]
-                if not existing:
-                    ok, msg, files = self.extractor.extract_container(bzip, container_dest)
-                    if not ok:
-                        self.unmatched_items.append({"path": str(bzip), "reason": f"总包容器解压失败: {msg}"})
-                        continue
-                for sub_item in sorted(list(container_dest.iterdir())):
-                    if sub_item.name not in IGNORED_PATTERNS and not sub_item.name.startswith("."):
-                        items.append(sub_item)
-        else:
-            # 常规模式：散放于 submit_dir 下的学生文件
-            for e in entries:
-                if e.name not in IGNORED_PATTERNS and not e.name.startswith("."):
-                    items.append(e)
+        # 2. 查找并解压总包容器压缩包 (未解压为同名容器目录的)
+        remaining_entries = []
+        for e in regular_entries:
+            clean_stem = re.sub(r"[\s_\-]", "", e.stem).lower()
+            if e.is_file() and e.suffix.lower() in KNOWN_ARCHIVE_EXTS and self._is_container_archive(e):
+                if clean_stem not in handled_container_stems:
+                    container_dest = WORK_DIR / f"{self.lab_name}_container" / e.stem
+                    container_dest.mkdir(parents=True, exist_ok=True)
+                    existing = [p for p in container_dest.iterdir() if p.name not in IGNORED_PATTERNS]
+                    if not existing:
+                        ok, msg, files = self.extractor.extract_container(e, container_dest)
+                        if not ok:
+                            self.unmatched_items.append({"path": str(e), "reason": f"总包容器解压失败: {msg}"})
+                            continue
+                    collect_from_dir(container_dest)
+                    handled_container_stems.add(clean_stem)
+            else:
+                remaining_entries.append(e)
+
+        # 3. 散放于 submit_dir 下的学生提交文件或未识别项
+        for e in remaining_entries:
+            items.append(e)
 
         return items
 
@@ -458,22 +522,26 @@ class SubmissionNormalizer:
         candidates = candidates or []
         archived_files: List[str] = []
 
+        # 来源标识：如果父目录不是 submit 根目录或保留目录，则记录父目录名作为来源标识
+        source_tag = ""
+        if entry.parent.resolve() != self.submit_dir.resolve() and entry.parent.name not in {"submit", "", self.lab_name}:
+            source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
+
         if entry.is_file() and entry.suffix.lower() in KNOWN_ARCHIVE_EXTS:
             # 压缩包：建立独立子目录 others/<archive_stem>/，保留原压缩包并解压全部内容
-            target_sub_dir = self.others_dir / entry.stem
-            if target_sub_dir.exists() and not any(target_sub_dir.iterdir()):
-                pass
-            elif target_sub_dir.exists():
-                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
-                target_sub_dir = self.others_dir / f"{entry.stem}_{source_tag}"
+            base_dir_name = f"{entry.stem}_{source_tag}" if source_tag else entry.stem
+            target_sub_dir = self.others_dir / base_dir_name
+            idx = 2
+            while target_sub_dir.exists():
+                target_sub_dir = self.others_dir / f"{base_dir_name}_{idx}"
+                idx += 1
 
             target_sub_dir.mkdir(parents=True, exist_ok=True)
 
             # 1. 保存原始压缩包副本，确保来源可完整追溯
             dest_archive = target_sub_dir / entry.name
             try:
-                if not dest_archive.exists() or dest_archive.stat().st_size != entry.stat().st_size:
-                    shutil.copy2(entry, dest_archive)
+                shutil.copy2(entry, dest_archive)
                 archived_files.append(dest_archive.name)
             except Exception:
                 pass
@@ -490,21 +558,30 @@ class SubmissionNormalizer:
 
             archive_dest_str = f"{self.lab_name}/src/others/{target_sub_dir.name}/"
         elif entry.is_dir():
-            target_sub_dir = self.others_dir / entry.name
-            if target_sub_dir.exists():
-                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
-                target_sub_dir = self.others_dir / f"{entry.name}_{source_tag}"
-            shutil.copytree(entry, target_sub_dir, dirs_exist_ok=True)
+            base_dir_name = f"{entry.name}_{source_tag}" if source_tag else entry.name
+            target_sub_dir = self.others_dir / base_dir_name
+            idx = 2
+            while target_sub_dir.exists():
+                target_sub_dir = self.others_dir / f"{base_dir_name}_{idx}"
+                idx += 1
+
+            shutil.copytree(entry, target_sub_dir)
             archive_dest_str = f"{self.lab_name}/src/others/{target_sub_dir.name}/"
             for p in target_sub_dir.rglob("*"):
                 if p.is_file():
                     archived_files.append(str(p.relative_to(target_sub_dir)))
         else:
             # 独立单文件 (如散放的照片、源码或未识别文件)
-            target_file = self.others_dir / entry.name
-            if target_file.exists() and target_file.stat().st_size != entry.stat().st_size:
-                source_tag = re.sub(r"[^\w\-.]", "_", entry.parent.name)
-                target_file = self.others_dir / f"{entry.stem}_{source_tag}{entry.suffix}"
+            base_filename = f"{entry.stem}_{source_tag}{entry.suffix}" if source_tag else entry.name
+            target_file = self.others_dir / base_filename
+            idx = 2
+            while target_file.exists():
+                if source_tag:
+                    target_file = self.others_dir / f"{entry.stem}_{source_tag}_{idx}{entry.suffix}"
+                else:
+                    target_file = self.others_dir / f"{entry.stem}_{idx}{entry.suffix}"
+                idx += 1
+
             try:
                 shutil.copy2(entry, target_file)
                 archived_files.append(target_file.name)

@@ -1379,6 +1379,70 @@ int main() {
         self.assertEqual(student_files["2026110214"][0].matched_problem, "1-2")
         self.assertNotIn("2026110214", normalizer.inferred_students)
 
+    def test_35_others_archive_no_overwrite_same_size(self):
+        """测试 35: 两个来源目录各有一个同名同大小的无法归属文件，归档到 others 时确保目标唯一不覆盖"""
+        roster = RosterManager()
+        lab_dir = self.test_work / "lab_others_collision"
+        normalizer = SubmissionNormalizer(roster, "lab1", lab_dir)
+        normalizer.others_dir.mkdir(parents=True, exist_ok=True)
+
+        dir1 = lab_dir / "submit" / "dir_a"
+        dir2 = lab_dir / "submit" / "dir_b"
+        dir1.mkdir(parents=True, exist_ok=True)
+        dir2.mkdir(parents=True, exist_ok=True)
+
+        file1 = dir1 / "unidentified.txt"
+        file2 = dir2 / "unidentified.txt"
+        file1.write_bytes(b"AAAA")  # 4 bytes
+        file2.write_bytes(b"BBBB")  # 4 bytes
+
+        rec1 = normalizer._archive_unattributed_item(file1, reason="未匹配A")
+        rec2 = normalizer._archive_unattributed_item(file2, reason="未匹配B")
+
+        # 验证两条审计记录指向不同目标
+        self.assertNotEqual(rec1["archive_dest"], rec2["archive_dest"])
+
+        # 验证两个文件均被归档在 others 中，内容均完整保留未被覆盖
+        others_files = list((lab_dir / "src" / "others").glob("*.txt"))
+        self.assertEqual(len(others_files), 2)
+        contents = {f.read_text(encoding="utf-8") for f in others_files}
+        self.assertEqual(contents, {"AAAA", "BBBB"})
+
+        # 测试同名目录与多次冲突循环重命名
+        d1 = dir1 / "sub_dir"
+        d2 = dir2 / "sub_dir"
+        d1.mkdir(parents=True, exist_ok=True)
+        d2.mkdir(parents=True, exist_ok=True)
+        (d1 / "f.txt").write_text("D1", encoding="utf-8")
+        (d2 / "f.txt").write_text("D2", encoding="utf-8")
+
+        drec1 = normalizer._archive_unattributed_item(d1, reason="目录A")
+        drec2 = normalizer._archive_unattributed_item(d2, reason="目录B")
+        self.assertNotEqual(drec1["archive_dest"], drec2["archive_dest"])
+
+    def test_36_nested_batch_dir_contains_student_submissions(self):
+        """测试 36: submit/学生作业/2026000067_Lab1-3.c 正常展开为总包，学生被正确匹配而非整体移入 others"""
+        s = Student(seq=1, student_id="2026000067", name="测试生", class_id="2612901")
+        roster = RosterManager()
+        roster.students = [s]
+        roster.by_id = {s.student_id: s}
+        roster.by_name = {s.name: [s]}
+
+        lab_dir = self.test_work / "lab_nested_batch"
+        batch_dir = lab_dir / "submit" / "学生作业"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        src_file = batch_dir / "2026000067_Lab1-3.c"
+        src_file.write_text("#include <stdio.h>\nint main(){ return 0; }", encoding="utf-8")
+
+        normalizer = SubmissionNormalizer(roster, "lab1", lab_dir)
+        student_files = normalizer.process_all_submissions()
+
+        self.assertIn("2026000067", student_files)
+        self.assertEqual(len(student_files["2026000067"]), 1)
+        self.assertEqual(student_files["2026000067"][0].matched_problem, "1-3")
+        # 学生作业目录未进入 others
+        others_entries = [p for p in (lab_dir / "src" / "others").iterdir() if p.name != "README.md"]
+        self.assertEqual(len(others_entries), 0)
 
 if __name__ == "__main__":
     unittest.main()
