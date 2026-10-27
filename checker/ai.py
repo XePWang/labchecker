@@ -172,6 +172,7 @@ class HandwrittenReviewer:
         expected_x: int,
         image_paths: List[Path],
         mock_mode: bool = False,
+        deduced_y: Optional[int] = None,
     ) -> Dict[str, Any]:
         """评测学生提交的手写图片材料，并进行严格边界校验与程序自算总分"""
         if not image_paths:
@@ -240,7 +241,7 @@ class HandwrittenReviewer:
         if cache_key in cache:
             cached_res = cache[cache_key]
             if not cached_res.get("is_pending"):
-                return cls.normalize_review_result(cached_res, student_id, student_name, expected_x)
+                return cls.normalize_review_result(cached_res, student_id, student_name, expected_x, deduced_y=deduced_y)
 
         image_str = ", ".join([str(p.resolve()) for p in valid_images])
         prompt = f"""
@@ -293,7 +294,7 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
             }
 
         try:
-            res = cls.normalize_review_result(res, student_id, student_name, expected_x)
+            res = cls.normalize_review_result(res, student_id, student_name, expected_x, deduced_y=deduced_y)
             if not mock_mode:
                 cache = _load_ai_cache()
                 cache[cache_key] = res
@@ -317,6 +318,7 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
         student_id: str,
         student_name: str,
         expected_x: int,
+        deduced_y: Optional[int] = None,
     ) -> Dict[str, Any]:
         """依据【目录优先、最大容错】原则，规范化演草纸视觉批改结果"""
         res = dict(res)
@@ -377,28 +379,68 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
             raw_xy = 0.0
             raw_deriv = 0.0
             info_score = 0.0
+            xy_match_score = 0.0
+            derivation_score = 0.0
         else:
             # 大一宽容政策：没有手写清楚信息不扣分（按0.50计），需与源码及提交目录对照检查
             info_score = 0.5
             res["info_score_raw"] = max(0.0, min(0.5, raw_info))
 
-            # 最大容错：若 review_reason 仅为“纸面未注明姓名学号/旋转/无法从纸面确认归属”，按目录归属认定本人提交，清除需复核标志
-            rr = str(res.get("review_reason", ""))
-            only_missing_info = any(k in rr for k in [
-                "未书写", "未标明", "未见学生姓名", "纸面上未", "纸面未",
-                "缺失手写", "未写明", "未填写", "缺失姓名", "缺失个人",
-                "无法直接从", "无法独立凭", "旋转", "横向拍摄", "电子文字叠加",
-                "未注明", "无法验证身份及 y 的来源", "演草纸学生身份矛盾"
-            ])
-            # 参数 x 检查
+            # 参数 x 检查与推导一致性核对
             hw_x = res.get("x_observed")
-            param_x_conflict = (hw_x is not None and hw_x != expected_x)
-            if only_missing_info and not param_x_conflict:
-                res["needs_review"] = False
-                res["review_reason"] = ""
+            hw_y = res.get("y_observed")
+            hw_phone = res.get("phone_observed")
+            if hw_y is None and hw_phone:
+                ph_digits = re.findall(r"\d+", str(hw_phone))
+                if ph_digits and len(ph_digits[-1]) >= 2:
+                    try:
+                        hw_y = int(ph_digits[-1][-2:])
+                    except ValueError:
+                        pass
 
-        xy_match_score = max(0.0, min(0.2, raw_xy))
-        derivation_score = max(0.0, min(0.8, raw_deriv))
+            param_x_conflict = (hw_x is not None and hw_x != expected_x)
+            param_y_conflict = (hw_y is not None and deduced_y is not None and hw_y != deduced_y)
+
+            if param_x_conflict or param_y_conflict:
+                xy_match_score = 0.0
+                res["needs_review"] = True
+                conflict_reasons = []
+                if param_x_conflict:
+                    conflict_reasons.append(f"参数 x 矛盾: 观察到 x={hw_x} 与预期 x={expected_x} 不符")
+                if param_y_conflict:
+                    conflict_reasons.append(f"参数 y 矛盾: 观察到 y={hw_y} 与代码推导 y={deduced_y} 不符")
+                res["review_reason"] = "; ".join(conflict_reasons)
+            else:
+                if hw_x == expected_x:
+                    xy_match_score = 0.2
+                else:
+                    xy_match_score = max(0.0, min(0.2, raw_xy))
+
+            derivation_score = max(0.0, min(0.8, raw_deriv))
+
+            # 区分【推导计算疑义】与【纯身份信息未写】：字迹不清/推导存疑绝不能被宽容规则自动清除
+            rr = str(res.get("review_reason", ""))
+            calc_doubt_keywords = [
+                "字迹不清", "模糊", "无法辨认", "难以辨认", "字迹潦草", "无法辨识", "辨识不清",
+                "计算错误", "推导有误", "缺少展开", "步骤缺失", "演算错误", "运算错误",
+                "逻辑错误", "结果错误", "步骤不全", "推导不完整", "缺少推导", "过程缺失",
+                "运算不符", "演算不符", "推导过程存疑",
+            ]
+            has_calc_doubt = any(k in rr for k in calc_doubt_keywords)
+
+            if has_calc_doubt:
+                res["needs_review"] = True
+            elif not param_x_conflict and not param_y_conflict:
+                only_missing_info = any(k in rr for k in [
+                    "未书写", "未标明", "未见学生姓名", "纸面上未", "纸面未",
+                    "缺失手写", "未写明", "未填写", "缺失姓名", "缺失个人",
+                    "无法直接从", "无法独立凭", "旋转", "横向拍摄", "电子文字叠加",
+                    "未注明", "无法验证身份及 y 的来源", "演草纸学生身份矛盾",
+                    "无法核实归属", "无法确认学生身份", "身份信息",
+                ])
+                if only_missing_info:
+                    res["needs_review"] = False
+                    res["review_reason"] = ""
 
         computed_score = round(info_score + xy_match_score + derivation_score, 2)
         res["info_score"] = info_score
