@@ -1668,5 +1668,87 @@ int main() {
         self.assertEqual(len(files_after_run2), 1, "重复归档不得因原始 GBK 与规范化 UTF-8 字节不同而生成 _alt 副本")
         self.assertFalse(any("_alt" in f.name for f in files_after_run2))
 
+    def test_42_temperature_symbols_encoding_detection(self):
+        """测试42: [P1] 包含 ℃、℉ 的合法 GBK 源码能正确解码为 UTF-8，不因汉字比例误判为未知编码"""
+        from checker.unpack import detect_and_decode_source
+
+        # 包含 ℃、℉ 和 °C 的 GBK 代码（无中文汉字）
+        gbk_code = b'#include <stdio.h>\nint main() { printf("100 \xa1\xe6 = 212 \xa8H\\n"); return 0; }\n'
+        ok, enc, text, conv, err = detect_and_decode_source(gbk_code)
+        self.assertTrue(ok, f"应成功识别含温度符号的 GBK 源码，而非被误判为: {err}")
+        self.assertIn("℃", text)
+        self.assertIn("℉", text)
+        self.assertEqual(enc, "gb18030")
+        self.assertTrue(conv)
+
+    def test_43_lab2_2_corrupted_encoding_review_flag(self):
+        """测试43: [P1] Lab 2-2 源码编码异常必须置 needs_review=True, is_pending=True 并记录待复核清单"""
+        from checker.labs.lab2 import Lab2Judge
+        from checker.models import SubmissionFile
+
+        lab_dir = self.test_work / "test_43_lab"
+        build_dir = lab_dir / "build"
+        src_dir = lab_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+        # 创建一个无法解码的损坏源码
+        bad_src = src_dir / f"{std.student_id}_Lab2-2.c"
+        bad_src.write_bytes(b"#include <stdio.h>\n/* \xff\xff\xff\xff */\nint main(){ return 0; }")
+
+        bad_sf = SubmissionFile(
+            path=bad_src,
+            original_name=bad_src.name,
+            file_type="c_source",
+            matched_problem="2-2",
+            source_encoding="unknown",
+            encoding_converted=False,
+            encoding_error="严格多编码解码均失败",
+        )
+
+        judge = Lab2Judge()
+        grade = judge.grade_student(std, [bad_sf], build_dir, mock_ai=True)
+
+        self.assertTrue(grade.needs_review, "编码损坏的 Lab 2-2 必须标记 needs_review=True")
+        self.assertTrue(grade.is_pending, "编码损坏的 Lab 2-2 必须标记 is_pending=True")
+        self.assertEqual(grade.status, "needs_review", "编码损坏的 Lab 2-2 成绩状态必须为 needs_review")
+        self.assertTrue(any("Lab 2-2" in r and "编码损坏" in r for r in grade.review_reasons), "待复核清单需记录编码损坏原因")
+
+    def test_44_candidate_deduplication_same_content_no_alt(self):
+        """测试44: [P2] 同一路径依次提交内容 A、B、B，后两份相同内容必须去重，不生成多余 _alt2"""
+        lab_dir = self.test_work / "test_44_lab"
+        normalizer = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        std = self.roster_mgr.students[0]
+
+        temp_submit = lab_dir / "temp_input"
+        temp_submit.mkdir(parents=True, exist_ok=True)
+
+        # 候选 1: 内容 A
+        f_a = temp_submit / "cand1.c"
+        f_a.write_text("int main() { /* Version A */ return 0; }", encoding="utf-8")
+        sf_1 = normalizer._classify_and_stage_file(std, f_a, "main.c")
+        self.assertIsNotNone(sf_1)
+        self.assertEqual(sf_1.path.name, "main.c")
+        normalizer.student_files.setdefault(std.student_id, []).append(sf_1)
+
+        # 候选 2: 内容 B (与 A 冲突，生成 main_alt.c)
+        f_b1 = temp_submit / "cand2.c"
+        f_b1.write_text("int main() { /* Version B */ return 0; }", encoding="utf-8")
+        sf_2 = normalizer._classify_and_stage_file(std, f_b1, "main.c")
+        self.assertIsNotNone(sf_2)
+        self.assertEqual(sf_2.path.name, "main_alt.c")
+        normalizer.student_files.setdefault(std.student_id, []).append(sf_2)
+
+        # 候选 3: 内容 B (与候选 2 完全相同，必须去重跳过，返回 None)
+        f_b2 = temp_submit / "cand3.c"
+        f_b2.write_text("int main() { /* Version B */ return 0; }", encoding="utf-8")
+        sf_3 = normalizer._classify_and_stage_file(std, f_b2, "main.c")
+        self.assertIsNone(sf_3, "内容相同的后续候选应去重并返回 None")
+
+        # 验证磁盘上只有 main.c 与 main_alt.c，绝不生成 main_alt2.c
+        staged_files = sorted([p.name for p in (lab_dir / "src" / std.student_id).glob("*.c")])
+        self.assertEqual(staged_files, ["main.c", "main_alt.c"], "磁盘上严禁存在 main_alt2.c")
+
 if __name__ == "__main__":
     unittest.main()

@@ -242,7 +242,8 @@ class Lab2Judge(BaseLabJudge):
             if c_encoding_error:
                 c_notes.append(f"源码编码损坏: {c_encoding_error}")
                 c_needs_review = True
-                c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
+                c_is_pending = True
+                c_reviews.append(f"Lab 2-1 源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}，待人工复核")
             elif sf and sf.encoding_converted:
                 c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
@@ -349,7 +350,7 @@ class Lab2Judge(BaseLabJudge):
             prob.is_pending = True
 
         if not c_res.success:
-            prob.status = "compile_error"
+            prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
             prob.notes.append("Lab 2-1 编译失败")
             return prob
 
@@ -418,11 +419,17 @@ class Lab2Judge(BaseLabJudge):
                 c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_2_cand_{cand_idx}")
             c_results = []
             c_notes = []
+            c_reviews = []
+            c_needs_review = False
+            c_is_pending = False
             passed_cases = 0
             typo_detected = False
 
             if c_encoding_error:
                 c_notes.append(f"源码编码损坏: {c_encoding_error}")
+                c_needs_review = True
+                c_is_pending = True
+                c_reviews.append(f"Lab 2-2 源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}，待人工复核")
             elif sf and sf.encoding_converted:
                 c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
 
@@ -523,6 +530,9 @@ class Lab2Judge(BaseLabJudge):
                 "c_res": c_compile,
                 "test_results": c_results,
                 "notes": c_notes,
+                "reviews": c_reviews,
+                "needs_review": c_needs_review,
+                "is_pending": c_is_pending,
                 "success": c_compile.success,
             })
 
@@ -536,14 +546,22 @@ class Lab2Judge(BaseLabJudge):
         prob.test_results = best_eval["test_results"]
         passed_cases = best_eval["passed_cases"]
         prob.notes.extend(best_eval["notes"])
+        if best_eval.get("needs_review"):
+            prob.needs_review = True
+            prob.review_reasons.extend(best_eval.get("reviews", []))
+        if best_eval.get("is_pending"):
+            prob.is_pending = True
 
         if not c_res.success:
-            prob.status = "compile_error"
+            prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
             prob.notes.append("Lab 2-2 编译失败")
             return prob
 
         prob.score = round(3.0 * (passed_cases / total_cases), 2)
-        if passed_cases == total_cases:
+        if prob.is_pending:
+            prob.status = "needs_review"
+            prob.score = 0.0
+        elif passed_cases == total_cases:
             prob.status = "passed"
         elif passed_cases > 0:
             prob.status = "partial"

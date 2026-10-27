@@ -56,20 +56,30 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
-def is_valid_cjk_or_punct(ch: str) -> bool:
-    """检查单个字符是否属于 CJK 表意字符、常用全角符号、标点符号或数学符号"""
+def is_valid_source_text_char(ch: str) -> bool:
+    """
+    检查单个非 ASCII 字符是否属于合法源程序/注释字符。
+    包括 CJK 统一汉字、扩展区汉字、常用标点、全半角符号、数学符号、箭头、
+    温度与度量衡符号 (℃, ℉, °)、带音调拼音、希腊字母及制表符等。
+    绝不能将汉字比例作为硬性通过条件。
+    """
     cp = ord(ch)
     return (
         (0x4E00 <= cp <= 0x9FFF)       # CJK Unified Ideographs
         or (0x3400 <= cp <= 0x4DBF)   # CJK Extension A
         or (0x20000 <= cp <= 0x2A6DF) # CJK Extension B
         or (0xF900 <= cp <= 0xFAFF)   # CJK Compatibility Ideographs
-        or (0x3000 <= cp <= 0x303F)   # CJK Symbols and Punctuation (、。，《》【】等)
-        or (0xFF01 <= cp <= 0xFFEE)   # Halfwidth and Fullwidth Forms (！，：等)
-        or (0x2000 <= cp <= 0x206F)   # General Punctuation (“”‘’—…等)
-        or (0x00A0 <= cp <= 0x00FF)   # Latin-1 Supplement (如 ° 摄氏度符号等)
-        or (0x2190 <= cp <= 0x22FF)   # Arrows & Math Operators
+        or (0x3000 <= cp <= 0x312F)   # CJK Symbols and Punctuation, Bopomofo
+        or (0x3200 <= cp <= 0x33FF)   # Enclosed CJK, CJK Compatibility
+        or (0x2000 <= cp <= 0x27FF)   # General Punctuation, Letterlike (℃ 0x2103, ℉ 0x2109), Number Forms, Arrows, Math, Box, Geometric
+        or (0xFF00 <= cp <= 0xFFEE)   # Halfwidth and Fullwidth Forms
+        or (0x00A0 <= cp <= 0x024F)   # Latin-1 Supplement (如 ° 0x00B0 摄氏度符号等), Latin Extended-A/B
+        or (0x0370 <= cp <= 0x04FF)   # Greek and Cyrillic
     )
+
+
+# 保留别名兼容
+is_valid_cjk_or_punct = is_valid_source_text_char
 
 
 def has_binary_controls(text: str) -> bool:
@@ -149,20 +159,21 @@ def detect_and_decode_source(raw_bytes: bytes) -> Tuple[bool, str, str, bool, Op
     except UnicodeDecodeError:
         pass
 
-    # 4. 严格尝试 GB18030 / GBK 解码 (校验有效 CJK 文本特征，杜绝任意二进制误判)
-    try:
-        text = raw_bytes.decode("gb18030")
-        if not has_binary_controls(text):
-            non_ascii = [c for c in text if ord(c) > 127]
-            if non_ascii:
-                valid_cjk = sum(1 for c in non_ascii if is_valid_cjk_or_punct(c))
-                if valid_cjk / len(non_ascii) >= 0.7:
-                    return True, "gb18030", text, True, None
-                return False, "unknown", "", False, "以 GB18030 解码成功但非 ASCII 字符大多不是有效汉字或标点"
-            else:
-                return True, "gb18030", text, False, None
-    except UnicodeDecodeError:
-        pass
+    # 4. 尝试 GBK / GB18030 解码 (校验有效字符特征，支持 ℃、℉ 等温度符号，杜绝二进制误判)
+    for enc in ["gb18030", "gbk"]:
+        try:
+            text = raw_bytes.decode(enc)
+            if not has_binary_controls(text):
+                non_ascii = [c for c in text if ord(c) > 127]
+                if non_ascii:
+                    # 允许任意合法文本字符 (包括 ℃, ℉, 汉字, 标点等)，绝不能将汉字比例作为硬性通过条件
+                    valid_chars = sum(1 for c in non_ascii if is_valid_source_text_char(c))
+                    if valid_chars / len(non_ascii) >= 0.7:
+                        return True, "gb18030", text, True, None
+                else:
+                    return True, "gb18030", text, False, None
+        except UnicodeDecodeError:
+            pass
 
     return False, "unknown", "", False, "严格多编码解码均失败 (不支持或损坏编码)"
 
@@ -827,27 +838,39 @@ class SubmissionNormalizer:
 
         existing_files = self.student_files.get(student.student_id, [])
 
+        stem = target_file_path.stem
+        matched_target_path: Optional[Path] = None
         write_needed = True
-        if target_file_path.exists() and target_file_path.is_file():
-            target_bytes = target_file_path.read_bytes()
-            if target_bytes == final_bytes:
-                # 目标已是规范化后的完全相同内容
-                if any(sf.path == target_file_path for sf in existing_files):
-                    return None  # 本次批次扫描中已注册过的条目，去重跳过
-                write_needed = False
-            elif is_source and target_bytes == raw_bytes:
-                # 目标磁盘为历史未转码的原始字节，直接就地规范化覆盖，严禁生成多余 _alt 副本
-                write_needed = True
+
+        # 检查候选路径族 [target, target_alt, target_alt2, ...]
+        # 优先复用或去重完全相同内容的文件，避免同一路径多次提交相同内容生成 _alt2、_alt3 导致重复编译
+        curr_alt_idx = 1
+        check_path = target_file_path
+        while True:
+            if check_path.exists() and check_path.is_file():
+                check_bytes = check_path.read_bytes()
+                if check_bytes == final_bytes:
+                    if any(sf.path == check_path for sf in existing_files):
+                        # 本批次中已登记过该完全相同内容候选（如 A, B, B 中的第二个 B），直接去重跳过
+                        return None
+                    matched_target_path = check_path
+                    write_needed = False
+                    break
+                elif is_source and check_bytes == raw_bytes:
+                    # 磁盘文件为历史未转码的原始字节，就地规范化覆盖
+                    matched_target_path = check_path
+                    write_needed = True
+                    break
+                else:
+                    curr_alt_idx += 1
+                    alt_name = f"{stem}_alt{ext}" if curr_alt_idx == 2 else f"{stem}_alt{curr_alt_idx - 1}{ext}"
+                    check_path = target_file_path.parent / alt_name
             else:
-                # 磁盘上存在与当前候选内容不同的真冲突文件
-                stem = target_file_path.stem
-                idx = 2
-                alt_path = target_file_path.parent / f"{stem}_alt{ext}"
-                while alt_path.exists() and any(sf.path == alt_path for sf in existing_files):
-                    alt_path = target_file_path.parent / f"{stem}_alt{idx}{ext}"
-                    idx += 1
-                target_file_path = alt_path
+                matched_target_path = check_path
                 write_needed = True
+                break
+
+        target_file_path = matched_target_path
 
         if write_needed:
             if is_source:
