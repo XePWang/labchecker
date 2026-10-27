@@ -62,6 +62,20 @@ class TestCaseResult:
 
 
 @dataclass
+class CheckItem:
+    """各实验题目的具体检查分项结果"""
+    problem_id: str             # 如 "1-1", "1-2", "1-3"
+    sub_item: str               # 评分项名称
+    submission_status: str      # 提交状态: 已提交, 未提交, 无法归属, 不适用
+    completion_status: str      # 达成状态: 已达成, 部分达成, 未达成, 无法验证, 待复核, 不适用
+    evidence: str               # 检查依据: 引用具体文件、测试输入与输出、编译诊断、图片或验算内容
+    deduction: Optional[float] = 0.0  # 建议扣分: 如 0.0, 0.20, None (若待复核或无法确定)
+    deduction_reason: str = ""  # 扣分理由
+    agent_note: str = ""        # Agent说明附注
+    needs_review: bool = False  # 是否需要复核
+
+
+@dataclass
 class ProblemResult:
     """单个题目最终评测结果"""
     problem_id: str
@@ -77,6 +91,7 @@ class ProblemResult:
     needs_review: bool = False
     review_reasons: List[str] = field(default_factory=list)
     is_pending: bool = False
+    check_items: List[CheckItem] = field(default_factory=list)
 
 
 @dataclass
@@ -92,3 +107,12 @@ class StudentGrade:
     review_reasons: List[str] = field(default_factory=list)
     is_pending: bool = False
     optional_results: Dict[str, ProblemResult] = field(default_factory=dict)
+
+    @property
+    def all_check_items(self) -> List[CheckItem]:
+        items: List[CheckItem] = []
+        for pid in sorted(self.problem_results.keys()):
+            items.extend(self.problem_results[pid].check_items)
+        for pid in sorted(self.optional_results.keys()):
+            items.extend(self.optional_results[pid].check_items)
+        return items
