@@ -172,6 +172,95 @@ class Lab1Judge(BaseLabJudge):
         prob.status = "passed"
         return prob
 
+    @staticmethod
+    def _extract_lab1_2_nine_terms(
+        stdout_str: str,
+        expected_x: int,
+        code_y: Optional[int] = None,
+    ) -> Tuple[List[int], int, List[Tuple[str, bool, int, int]]]:
+        """
+        从可执行文件输出中鲁棒识别 Lab 1-2 的 9 项运算结果。
+        支持前置说明文字 (如 x=93, y=82)、末尾调试输出以及非格式化多余数值的过滤。
+        """
+        all_numbers = [int(n) for n in re.findall(r"-?\d+", stdout_str)]
+        candidates = []
+
+        # 1. 连续 9 个数字的滑动窗口
+        if len(all_numbers) >= 9:
+            for k in range(len(all_numbers) - 9 + 1):
+                candidates.append(all_numbers[k:k+9])
+
+        # 2. 按行提取 (每行取前3个或后3个数字，应对未初始化格式化参数导致的单行多数字)
+        lines = [l.strip() for l in stdout_str.splitlines() if l.strip()]
+        line_nums = [[int(n) for n in re.findall(r"-?\d+", l)] for l in lines]
+        active_lines = [nums for nums in line_nums if nums]
+        if len(active_lines) >= 3:
+            for i in range(len(active_lines) - 2):
+                la, lb, lc = active_lines[i], active_lines[i+1], active_lines[i+2]
+                if len(la) >= 3 and len(lb) >= 3 and len(lc) >= 3:
+                    candidates.append(la[:3] + lb[:3] + lc[:3])
+                    candidates.append(la[-3:] + lb[-3:] + lc[-3:])
+
+        if not candidates:
+            v_list = all_numbers[:9] if all_numbers else [0] * 9
+            while len(v_list) < 9:
+                v_list.append(0)
+            return v_list, 0, []
+
+        best_c = candidates[0]
+        best_score = (-1, -1)
+        best_y = 0
+        best_checks: List[Tuple[str, bool, int, int]] = []
+
+        for c in candidates:
+            if len(c) != 9:
+                continue
+            deduced = c[4] + c[5] - expected_x
+            y_cands = [deduced] if (0 <= deduced <= 99) else []
+            if code_y is not None and code_y not in y_cands:
+                y_cands.append(code_y)
+            if not y_cands:
+                y_cands.append(deduced)
+
+            for y in y_cands:
+                exp_v1 = 0 if expected_x != 0 else 1
+                exp_v2 = 1 if (expected_x != 0 or y != 0) else 0
+                exp_v3 = 1 if (expected_x != 0 and y != 0) else 0
+                exp_v4 = (65536 + (~expected_x)) & 0xFFFF
+                exp_v5 = (expected_x | y)
+                exp_v6 = (expected_x & y)
+                exp_v7 = (~expected_x)
+                exp_v8 = (expected_x | y)
+                exp_v9 = (expected_x & y)
+
+                checks = [
+                    ("!x", c[0] == exp_v1, c[0], exp_v1),
+                    ("x||y", c[1] == exp_v2, c[1], exp_v2),
+                    ("x&&y", c[2] == exp_v3, c[2], exp_v3),
+                    ("~x(unsigned)", c[3] == exp_v4, c[3], exp_v4),
+                    ("x|y(line2)", c[4] == exp_v5, c[4], exp_v5),
+                    ("x&y(line2)", c[5] == exp_v6, c[5], exp_v6),
+                    ("~x(signed)", c[6] == exp_v7, c[6], exp_v7),
+                    ("x|y(line3)", c[7] == exp_v8, c[7], exp_v8),
+                    ("x&y(line3)", c[8] == exp_v9, c[8], exp_v9),
+                ]
+
+                matches = sum(1 for _, ok, _, _ in checks if ok)
+                bonus = 0
+                if c[4] == c[7]: bonus += 1
+                if c[5] == c[8]: bonus += 1
+                if c[6] == ~expected_x: bonus += 2
+                if c[0] in (0, 1) and c[1] in (0, 1) and c[2] in (0, 1): bonus += 1
+
+                score = (matches, bonus)
+                if score > best_score:
+                    best_score = score
+                    best_c = c
+                    best_y = y
+                    best_checks = checks
+
+        return best_c, best_y, best_checks
+
     def _grade_lab1_2(
         self,
         student: Student,
@@ -267,14 +356,13 @@ class Lab1Judge(BaseLabJudge):
                         c_notes.append(f"Lab 1-2 运行时崩溃 (exit {c_exec.exit_code})")
                         c_score = 0.0
                     else:
-                        numbers = [int(n) for n in re.findall(r"-?\b\d+\b", c_exec.stdout)]
-                        if len(numbers) >= 9:
-                            cv1, cv2, cv3 = numbers[0], numbers[1], numbers[2]
-                            cv4, cv5, cv6 = numbers[3], numbers[4], numbers[5]
-                            cv7, cv8, cv9 = numbers[6], numbers[7], numbers[8]
-                            c_v_list = [cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8, cv9]
+                        all_numbers = [int(n) for n in re.findall(r"-?\d+", c_exec.stdout)]
+                        if len(all_numbers) >= 9:
+                            c_v_list, c_deduced_y, c_checks = self._extract_lab1_2_nine_terms(
+                                c_exec.stdout, expected_x, c_code_y
+                            )
+                            cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8, cv9 = c_v_list
 
-                            c_deduced_y = cv5 + cv6 - expected_x
                             if c_code_y is not None and c_code_y != c_deduced_y:
                                 c_notes.append(f"代码字面 y={c_code_y} 与运算输出推导 y={c_deduced_y} 存在偏差")
 
@@ -287,18 +375,6 @@ class Lab1Judge(BaseLabJudge):
                             exp_v7 = (~expected_x)
                             exp_v8 = (expected_x | c_deduced_y)
                             exp_v9 = (expected_x & c_deduced_y)
-
-                            c_checks = [
-                                ("!x", cv1 == exp_v1, cv1, exp_v1),
-                                ("x||y", cv2 == exp_v2, cv2, exp_v2),
-                                ("x&&y", cv3 == exp_v3, cv3, exp_v3),
-                                ("~x(unsigned)", cv4 == exp_v4, cv4, exp_v4),
-                                ("x|y(line2)", cv5 == exp_v5, cv5, exp_v5),
-                                ("x&y(line2)", cv6 == exp_v6, cv6, exp_v6),
-                                ("~x(signed)", cv7 == exp_v7, cv7, exp_v7),
-                                ("x|y(line3)", cv8 == exp_v8, cv8, exp_v8),
-                                ("x&y(line3)", cv9 == exp_v9, cv9, exp_v9),
-                            ]
 
                             passed_terms = sum(1 for _, ok, _, _ in c_checks if ok)
                             failed_terms = [name for name, ok, _, _ in c_checks if not ok]
@@ -316,7 +392,7 @@ class Lab1Judge(BaseLabJudge):
                                 c_score = round(1.5 * (passed_terms / 9.0), 2)
                                 c_notes.append(f"代码运算有 {len(failed_terms)} 项不符预期: {', '.join(failed_terms)} (通过 {passed_terms}/9)")
                         else:
-                            c_notes.append(f"代码输出数字不足 9 个 (实际输出 {len(numbers)} 个)")
+                            c_notes.append(f"代码输出数字不足 9 个 (实际输出 {len(all_numbers)} 个)")
                             c_score = 0.2
 
                 cand_evaluations.append({
@@ -377,6 +453,7 @@ class Lab1Judge(BaseLabJudge):
             expected_x=expected_x,
             image_paths=images,
             mock_mode=mock_ai,
+            deduced_y=deduced_y,
         )
         prob.ai_review = ai_res
         handwritten_score = 0.0
@@ -827,14 +904,24 @@ class Lab1Judge(BaseLabJudge):
                 needs_review=True,
             ))
         else:
-            raw_info = float(ai_res.get("info_score_raw", ai_res.get("info_score", 0.5)))
-            if raw_info >= 0.5:
+            obs_sid = ai_res.get("student_id_observed")
+            obs_name = ai_res.get("name_observed")
+            obs_phone = ai_res.get("phone_observed")
+            missing_items = []
+            if not obs_name:
+                missing_items.append("姓名")
+            if not obs_sid:
+                missing_items.append("学号")
+            if not obs_phone:
+                missing_items.append("手机号")
+
+            if not missing_items:
                 items.append(CheckItem(
                     problem_id="1-2",
                     sub_item="姓名、学号、手机号完整性",
                     submission_status="已提交",
                     completion_status="已达成",
-                    evidence=f"演草纸手写身份信息齐全 (姓名: {ai_res.get('name_observed') or student.name}, 学号: {ai_res.get('student_id_observed') or student.student_id}, 手机号: {ai_res.get('phone_observed') or '已核对'})",
+                    evidence=f"演草纸手写身份信息齐全 (姓名: {obs_name}, 学号: {obs_sid}, 手机号: {obs_phone})",
                     deduction=0.0,
                     deduction_reason="",
                     agent_note="手写身份信息齐全",
@@ -846,7 +933,7 @@ class Lab1Judge(BaseLabJudge):
                     sub_item="姓名、学号、手机号完整性",
                     submission_status="已提交",
                     completion_status="已达成",
-                    evidence=f"演草纸未完整手写身份信息，已与源码 ({src_path.name if src_path else '源码'}) 及提交目录对照核验一致，按大一宽容原则不扣分",
+                    evidence=f"演草纸未完整手写{'、'.join(missing_items)}，已与源码 ({src_path.name if src_path else '源码'}) 及提交目录对照核验一致，按大一宽容原则不扣分",
                     deduction=0.0,
                     deduction_reason="",
                     agent_note="依源码与目录核对确认归属，宽容不扣分",
@@ -879,11 +966,10 @@ class Lab1Judge(BaseLabJudge):
                 needs_review=True,
             ))
         else:
-            xy_score = float(ai_res.get("xy_match_score", 0.0))
             hw_x = ai_res.get("x_observed")
             hw_y = ai_res.get("y_observed")
             has_param_mismatch = (hw_x is not None and hw_x != expected_x) or (hw_y is not None and deduced_y is not None and hw_y != deduced_y)
-            if has_param_mismatch or xy_score < 0.2:
+            if has_param_mismatch:
                 items.append(CheckItem(
                     problem_id="1-2",
                     sub_item="手写参数与身份及源码一致性",
@@ -901,7 +987,7 @@ class Lab1Judge(BaseLabJudge):
                     sub_item="手写参数与身份及源码一致性",
                     submission_status="已提交",
                     completion_status="已达成",
-                    evidence=f"手写参数 x={hw_x}, y={hw_y} 与身份信息及代码推导完全一致",
+                    evidence=f"手写参数 x={hw_x}, y={hw_y} 与身份信息及代码推导完全一致" if (hw_x is not None and hw_y is not None) else f"手写参数与身份信息及代码推导核对一致 (x={expected_x}, y={deduced_y})",
                     deduction=0.0,
                     deduction_reason="",
                     agent_note="参数一致性完全达成",
@@ -1121,14 +1207,16 @@ class Lab1Judge(BaseLabJudge):
                                 if abs(val - expected_val) <= 0.08:
                                     found_match = True
                                     break
-                                if expected_val != 0.0 and abs(val - 0.0) < 0.001 and conv_type == "Centigrade":
-                                    c_has_int_div_bug = True
 
                             if found_match:
                                 case_res.passed = True
                                 case_res.score = case_res.max_score
                                 c_passed_cases += 1
                             else:
+                                if expected_val != 0.0 and conv_type == "Centigrade":
+                                    if any(abs(val - 0.0) < 0.001 for val in floats):
+                                        c_has_int_div_bug = True
+
                                 if idx == 1:
                                     ai_sem = SemanticAmbiguityReviewer.review_output(
                                         problem_id="1-3",
@@ -1159,6 +1247,13 @@ class Lab1Judge(BaseLabJudge):
                             cr.passed = False
                             cr.score = 0.0
                             cr.error_message = "静态输出检测失败：不同输入输出无变化"
+
+                    f2c_idx = [0, 1, 2, 6, 7, 9]
+                    f2c_cases = [c_results[i] for i in f2c_idx if i < len(c_results)]
+                    passed_f2c_cand = sum(1 for c in f2c_cases if c.passed)
+                    total_f2c_cand = len(f2c_cases)
+                    if passed_f2c_cand == total_f2c_cand:
+                        c_has_int_div_bug = False
 
                     if c_has_int_div_bug:
                         c_notes.append("检测到典型 C 语言整型截断除法缺陷 (如 5/9 得 0)")
@@ -1331,19 +1426,7 @@ class Lab1Judge(BaseLabJudge):
             f2c_cases = [prob.test_results[i] for i in f2c_idx if i < len(prob.test_results)]
             passed_f2c = sum(1 for c in f2c_cases if c.passed)
             total_f2c = len(f2c_cases)
-            if has_int_div_bug:
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="华氏转摄氏计算",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence=f"模式0输出样例: {outputs_collected[0] if outputs_collected else ''} (预期37.78)，摄氏度结果恒为 0 或 32",
-                    deduction=0.80,
-                    deduction_reason="存在典型整型截断除法缺陷 (5/9 在 C 语言中得 0，导致摄氏度输出为 0.00)",
-                    agent_note="整型除法 5/9 截断缺陷",
-                    needs_review=False,
-                ))
-            elif passed_f2c == total_f2c:
+            if passed_f2c == total_f2c:
                 items.append(CheckItem(
                     problem_id="1-3",
                     sub_item="华氏转摄氏计算",
@@ -1353,6 +1436,18 @@ class Lab1Judge(BaseLabJudge):
                     deduction=0.0,
                     deduction_reason="",
                     agent_note="华氏转摄氏正确",
+                    needs_review=False,
+                ))
+            elif has_int_div_bug:
+                items.append(CheckItem(
+                    problem_id="1-3",
+                    sub_item="华氏转摄氏计算",
+                    submission_status="已提交",
+                    completion_status="部分达成",
+                    evidence=f"模式0输出样例: {outputs_collected[0] if outputs_collected else ''} (预期37.78)，摄氏度结果恒为 0 或 32",
+                    deduction=0.80,
+                    deduction_reason="存在典型整型截断除法缺陷 (5/9 在 C 语言中得 0，导致摄氏度输出为 0.00)",
+                    agent_note="整型除法 5/9 截断缺陷",
                     needs_review=False,
                 ))
             else:
