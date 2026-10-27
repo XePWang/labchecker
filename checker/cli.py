@@ -92,6 +92,22 @@ def run_lab(
             return 1
         students_to_grade = [target]
 
+    # 若为真实 Lab 1 批次评测，启用 AI4study 手写验算多线程并发预热加速
+    if not mock_ai and lab_name == "lab1":
+        from checker.ai import HandwrittenReviewer
+        ai_tasks = []
+        for s in students_to_grade:
+            s_files = student_files_map.get(s.student_id, [])
+            imgs = [f.path for f in s_files if f.file_type == "image"]
+            if imgs:
+                try:
+                    exp_x = int(s.student_id[-2:])
+                except Exception:
+                    exp_x = 0
+                ai_tasks.append((s.student_id, s.name, exp_x, imgs))
+        if ai_tasks:
+            HandwrittenReviewer.precompute_reviews(ai_tasks, max_workers=4)
+
     print(f"[*] 开始自动化评测 (共 {len(students_to_grade)} 人, Mock AI: {mock_ai})...")
     for idx, student in enumerate(students_to_grade, 1):
         if student.student_id in normalizer.conflict_students:
@@ -113,6 +129,12 @@ def run_lab(
         else:
             files = student_files_map.get(student.student_id, [])
             grade = judge.grade_student(student, files, build_dir, mock_ai=mock_ai)
+            if student.student_id in getattr(normalizer, "inferred_students", {}):
+                inf_reason = normalizer.inferred_students[student.student_id]
+                grade.needs_review = True
+                grade.review_reasons.append(inf_reason)
+                if grade.status == "graded":
+                    grade.status = "needs_review"
             grades[student.student_id] = grade
 
         status_flag = "✓" if grade.status == "graded" else ("!" if grade.needs_review else "✗")

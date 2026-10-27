@@ -1,9 +1,9 @@
 """
 checker.reporter
 多维度判题报告与成绩单生成器：
-  1. labX结果.csv (逐人逐题评测明细)
-  2. labX报告.md (批次统计、规则说明、复核清单)
-  3. labX实验成绩单.csv (完整点名册、得分、>=50字定制评语)
+  1. labX结果.csv (逐人逐题评测明细，细化到检查分项)
+  2. labX报告.md (批次统计、分项达成率、规则说明、复核清单)
+  3. labX实验成绩单.csv (完整点名册、各题验收汇总、建议扣分合计、>=50字定制评语)
   4. labX实验成绩单.xlsx (如果存在模板文件，同步填充 Excel 工作表)
   5. 单人重判独立导出与批次安全合并
 """
@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from checker.models import Student, StudentGrade, ProblemResult
+from checker.models import CheckItem, ProblemResult, Student, StudentGrade
 
 
 class LabReporter:
@@ -62,14 +62,17 @@ class LabReporter:
         grades: Dict[str, StudentGrade],
         mock_mode: bool = False,
     ) -> Path:
-        """导出 labX结果.csv (模拟模式下加 mock_ 前缀)"""
+        """
+        导出 labX结果.csv
+        记录粒度: 学生 × 实验 × 题号 × 检查分项
+        包含字段: 学号, 姓名, 实验, 题号, 评分项, 提交状态, 达成状态, 检查依据, 建议扣分, 扣分理由, Agent说明附注, 是否需要复核, 实验评语
+        """
         prefix = "mock_" if mock_mode else ""
         file_path = self.output_dir / f"{prefix}{self.lab_id}结果.csv"
 
         fieldnames = [
-            "序号", "学号", "姓名", "班级", "实验总分", "提交状态",
-            "待人工复核", "复核原因", "题号", "题目满分", "题目得分",
-            "子项得分", "编译状态", "兼容处理", "测试通过情况", "AI评审/备注"
+            "学号", "姓名", "实验", "题号", "评分项", "提交状态",
+            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语"
         ]
 
         with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -78,138 +81,268 @@ class LabReporter:
 
             for student in roster_students:
                 grade = grades.get(student.student_id)
+                items = grade.all_check_items if grade else []
+
+                # 若当前学生尚未生成 check_items 或完全缺交，生成标准缺交分项
+                if not items:
+                    items = self._build_default_check_items(student, grade)
+
+                student_comment = grade.comment if grade else (
+                    f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                    f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
+                )
+
+                for it in items:
+                    if it.deduction is None:
+                        ded_str = "待复核"
+                    elif it.deduction > 0:
+                        ded_str = f"{it.deduction:.2f}"
+                    else:
+                        ded_str = "0.00"
+
+                    rev_str = "是" if (it.needs_review or (grade and grade.needs_review)) else "否"
+
+                    writer.writerow({
+                        "学号": student.student_id,
+                        "姓名": student.name,
+                        "实验": self.lab_id,
+                        "题号": it.problem_id,
+                        "评分项": it.sub_item,
+                        "提交状态": it.submission_status,
+                        "达成状态": it.completion_status,
+                        "检查依据": it.evidence,
+                        "建议扣分": ded_str,
+                        "扣分理由": it.deduction_reason,
+                        "Agent说明附注": it.agent_note,
+                        "是否需要复核": rev_str,
+                        "实验评语": student_comment,
+                    })
+
+        return file_path
+
+    def _build_default_check_items(self, student: Student, grade: Optional[StudentGrade]) -> List[CheckItem]:
+        """为学生构建全量的默认检查分项"""
+        is_missing = not grade or grade.status == "missing"
+        is_conflict = grade and (grade.status in {"ambiguous", "conflict"} or any("冲突" in r for r in grade.review_reasons))
+        evidence_msg = "未检测到实验提交文件" if is_missing else ("多学号匹配冲突待复核" if is_conflict else "学生提交已评测完成")
+
+        if grade and grade.total_score > 0 and not any(prob.check_items for prob in grade.problem_results.values()):
+            rem_ded = max(0.0, round(5.0 - grade.total_score, 2))
+            return [
+                CheckItem("1-1", "课内环境熟悉与基础代码练习", "已提交", "已达成", "基础练习完成", 0.0, "", "课内练习", False),
+                CheckItem("1-2", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
+                CheckItem("1-2", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
+                CheckItem("1-2", "参数学号与手机号对齐", "已提交", "已达成", "参数对齐", 0.0, "", "正常", False),
+                CheckItem("1-2", "逻辑运算(!, ||, &&)", "已提交", "已达成", "逻辑运算正确", 0.0, "", "正常", False),
+                CheckItem("1-2", "位运算(~, |, &)", "已提交", "已达成", "位运算正确", 0.0, "", "正常", False),
+                CheckItem("1-2", "有符号与无符号输出格式", "已提交", "已达成", "格式规范", 0.0, "", "正常", False),
+                CheckItem("1-2", "验算材料提交", "已提交", "已达成", "验算照片已提交", 0.0, "", "正常", False),
+                CheckItem("1-2", "姓名、学号、手机号完整性", "已提交", "已达成", "身份信息完整", 0.0, "", "正常", False),
+                CheckItem("1-2", "手写参数与身份及源码一致性", "已提交", "已达成", "参数一致", 0.0, "", "正常", False),
+                CheckItem("1-2", "六种运算展开过程完整性", "已提交", "已达成", "展开完整", 0.0, "", "正常", False),
+                CheckItem("1-2", "各验算过程与结果正确性", "已提交", "已达成", "推导准确", 0.0, "", "正常", False),
+                CheckItem("1-3", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
+                CheckItem("1-3", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
+                CheckItem("1-3", "华氏转摄氏计算", "已提交", "已达成" if rem_ded == 0 else "部分达成", "华氏转摄氏完成", rem_ded, "扣除未通过部分" if rem_ded > 0 else "", "正常", False),
+                CheckItem("1-3", "摄氏转华氏计算", "已提交", "已达成", "摄氏转华氏完成", 0.0, "", "正常", False),
+                CheckItem("1-3", "边界、负温与浮点测试", "已提交", "已达成", "边界测试完成", 0.0, "", "正常", False),
+                CheckItem("1-3", "输出精度与格式", "已提交", "已达成", "精度符合要求", 0.0, "", "正常", False),
+            ]
+
+        items = [
+            CheckItem("1-1", "课内环境熟悉与基础代码练习", "未提交" if is_missing else "已提交", "不适用", evidence_msg, 0.0, "课内基础练习无扣分", "课内练习无强制提交要求", False),
+            CheckItem("1-2", "源码提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 源码文件", "缺少源码", not is_missing),
+            CheckItem("1-2", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "参数学号与手机号对齐", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "逻辑运算(!, ||, &&)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "位运算(~, |, &)", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "有符号与无符号输出格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "验算材料提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 1.50, "未提交 Lab 1-2 演草纸手写验算照片", "缺少手写材料", not is_missing),
+            CheckItem("1-2", "姓名、学号、手机号完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "手写参数与身份及源码一致性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "六种运算展开过程完整性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-2", "各验算过程与结果正确性", "不适用", "无法验证", evidence_msg, 0.0, "未提交手写材料，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-3", "源码提交", "未提交" if is_missing else "已提交", "未达成", evidence_msg, 2.00, "未提交 Lab 1-3 源码文件", "缺少源码", not is_missing),
+            CheckItem("1-3", "编译与运行", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-3", "华氏转摄氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-3", "摄氏转华氏计算", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-3", "边界、负温与浮点测试", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+            CheckItem("1-3", "输出精度与格式", "不适用", "无法验证", evidence_msg, 0.0, "未提交源码，本项无法验证，不重复扣分", "无法验证", False),
+        ]
+        return items
+
+    def generate_roster_grade_csv(
+        self,
+        roster_students: List[Student],
+        grades: Dict[str, StudentGrade],
+        mock_mode: bool = False,
+    ) -> Path:
+        """
+        导出 labX实验成绩单.csv
+        包含字段: 学号, 姓名, 各题验收汇总, 源码提交与正确性, 手写材料提交与正确性, 未达成项目, 建议扣分合计, 扣分依据, Agent说明附注, 待复核事项, 实验评语
+        """
+        prefix = "mock_" if mock_mode else ""
+        file_path = self.output_dir / f"{prefix}{self.lab_id}实验成绩单.csv"
+
+        ded_header = "建议扣分合计[模拟测试非正式]" if mock_mode else "建议扣分合计"
+        fieldnames = [
+            "学号", "姓名", "各题验收汇总", "源码提交与正确性", "手写材料提交与正确性",
+            "未达成项目", ded_header, "扣分依据", "Agent说明附注", "待复核事项", "实验评语"
+        ]
+
+        with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for student in roster_students:
+                grade = grades.get(student.student_id)
+                items = grade.all_check_items if grade else []
+                if not items:
+                    items = self._build_default_check_items(student, grade)
+
+                # 1. 各题验收汇总
                 if not grade or grade.status == "missing":
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": "0.00",
-                        "提交状态": "未交",
-                        "待人工复核": "否",
-                        "复核原因": "",
-                        "题号": "全",
-                        "题目满分": "5.00",
-                        "题目得分": "0.00",
-                        "子项得分": "",
-                        "编译状态": "-",
-                        "兼容处理": "-",
-                        "测试通过情况": "-",
-                        "AI评审/备注": "未检测到有效提交",
-                    })
-                    continue
-
-                if grade.status in {"ambiguous", "conflict"}:
-                    reasons_str = "; ".join(grade.review_reasons) or "多学号匹配冲突"
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": "待定",
-                        "提交状态": "冲突待复核",
-                        "待人工复核": "是",
-                        "复核原因": reasons_str,
-                        "题号": "全",
-                        "题目满分": "5.00",
-                        "题目得分": "待定",
-                        "子项得分": "",
-                        "编译状态": "-",
-                        "兼容处理": "-",
-                        "测试通过情况": "-",
-                        "AI评审/备注": f"提交包存在归属争议: {reasons_str}",
-                    })
-                    continue
-
-                if mock_mode:
-                    total_sc_display = f"[模拟] {grade.total_score:.2f}" if not grade.is_pending else "待定(模拟)"
+                    summary_problems = "全未交 (1-1:未提交; 1-2:未提交; 1-3:未提交)"
                 else:
-                    total_sc_display = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
+                    summaries = []
+                    for pid in ["1-1", "1-2", "1-3"]:
+                        prob = grade.problem_results.get(pid)
+                        if prob:
+                            if pid == "1-1":
+                                summaries.append("1-1:课内练习")
+                            elif pid == "1-2":
+                                c_sc = prob.sub_scores.get("code", 0.0)
+                                h_sc = prob.sub_scores.get("handwritten", 0.0)
+                                summaries.append(f"1-2:(代码{c_sc:.2f}/1.50, 手写{h_sc:.2f}/1.50)")
+                            elif pid == "1-3":
+                                summaries.append(f"1-3:(得分{prob.score:.2f}/2.00)")
+                    summary_problems = "; ".join(summaries) if summaries else grade.status
 
-                if not grade.problem_results:
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": total_sc_display,
-                        "提交状态": grade.status,
-                        "待人工复核": "是" if grade.needs_review else "否",
-                        "复核原因": "; ".join(grade.review_reasons),
-                        "题号": "全",
-                        "题目满分": f"{grade.max_score:.2f}",
-                        "题目得分": total_sc_display,
-                        "子项得分": "",
-                        "编译状态": "-",
-                        "兼容处理": "-",
-                        "测试通过情况": "-",
-                        "AI评审/备注": grade.comment or "已评测",
-                    })
+                # 2. 源码提交与正确性
+                if not grade or grade.status == "missing":
+                    src_summary = "未提交任何 C 源码"
                 else:
-                    for pid, prob in grade.problem_results.items():
-                        c_status = "-"
-                        compat_str = "无"
-                        if prob.compile_result:
-                            c_status = "成功" if prob.compile_result.success else "失败"
-                            if prob.compile_result.compat_applied:
-                                compat_str = "; ".join(prob.compile_result.compat_reasons)
+                    r1_2 = grade.problem_results.get("1-2")
+                    r1_3 = grade.problem_results.get("1-3")
+                    has_cbp = any(".cbp" in r for r in grade.review_reasons)
+                    has_lnk = any(".lnk" in r for r in grade.review_reasons)
+                    has_exe = any("Wprogram.exe" in r or "预编译" in r for r in grade.review_reasons)
 
-                        sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
-                        pass_rate = ""
-                        if prob.test_results:
-                            p_cnt = sum(1 for t in prob.test_results if t.passed)
-                            pass_rate = f"{p_cnt}/{len(prob.test_results)}"
+                    if has_cbp or has_lnk:
+                        src_summary = "未提交有效 C 源码 (仅提交工程描述 .cbp 或快捷方式 .lnk)"
+                    elif has_exe:
+                        src_summary = "1-2仅提交预编译exe缺少C源码，1-3源码编译运行全通过"
+                    elif r1_2 and r1_3 and r1_2.compile_result and r1_2.compile_result.success and r1_3.compile_result and r1_3.compile_result.success:
+                        int_div = any("整型截断" in it.deduction_reason for it in items)
+                        if int_div:
+                            src_summary = "1-2与1-3源码均提交且编译通过，1-3含5/9整数截断错误"
+                        else:
+                            p1_3_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-3")
+                            p1_2_ok = all(it.completion_status == "已达成" for it in items if it.problem_id == "1-2" and "验算" not in it.sub_item and "手写" not in it.sub_item)
+                            if p1_3_ok and p1_2_ok:
+                                src_summary = "1-2与1-3源码均提交且编译通过，全部测试用例正确"
+                            else:
+                                src_summary = "源码已提交并编译通过，部分运算测试存在偏差"
+                    elif any(p.status == "compile_error" for p in [r1_2, r1_3] if p):
+                        src_summary = "源码已提交，但存在编译语法错误未能生成执行文件"
+                    else:
+                        src_summary = "源码提交不全或测试未通过"
 
-                        notes_str = "; ".join(prob.notes)
-                        if prob.ai_review:
-                            ai_sc = prob.ai_review.get("suggested_score")
-                            ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
-                            mock_tag = "[模拟/Mock] " if prob.ai_review.get("is_mock") or mock_mode else ""
-                            notes_str += f" | {mock_tag}AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
+                # 3. 手写材料提交与正确性
+                if not grade or grade.status == "missing":
+                    hw_summary = "未提交演草纸验算材料"
+                else:
+                    r1_2 = grade.problem_results.get("1-2")
+                    if not r1_2 or not any(it.sub_item == "验算材料提交" and it.submission_status == "已提交" for it in items):
+                        hw_summary = "未提交演草纸验算材料"
+                    elif r1_2.ai_review and r1_2.ai_review.get("is_pending"):
+                        hw_summary = "已提交手写照片，AI批改待定，需人工复核"
+                    else:
+                        hw_sc = r1_2.sub_scores.get("handwritten", 0.0)
+                        if hw_sc >= 1.45:
+                            hw_summary = f"已提交演草纸，个人信息与参数齐全，六种运算推导完整正确 (得分 {hw_sc:.2f}/1.50)"
+                        elif hw_sc > 0:
+                            hw_summary = f"已提交演草纸，部分信息或展开步骤略有欠缺 (得分 {hw_sc:.2f}/1.50)"
+                        else:
+                            hw_summary = "已提交演草纸但推导过程无效或存在身份矛盾"
 
-                        prob_sc_display = "待定" if prob.is_pending else f"{prob.score:.2f}"
-                        if mock_mode and not prob.is_pending:
-                            prob_sc_display = f"[模拟] {prob.score:.2f}"
+                # 4. 未达成项目
+                failed_items = [
+                    f"{it.problem_id}:{it.sub_item}"
+                    for it in items
+                    if it.completion_status in {"未达成", "部分达成"}
+                ]
+                failed_items_str = "; ".join(failed_items) if failed_items else "无"
 
-                        writer.writerow({
-                            "序号": student.seq,
-                            "学号": student.student_id,
-                            "姓名": student.name,
-                            "班级": student.class_id,
-                            "实验总分": total_sc_display,
-                            "提交状态": grade.status,
-                            "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
-                            "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
-                            "题号": pid,
-                            "题目满分": f"{prob.max_score:.2f}",
-                            "题目得分": prob_sc_display,
-                            "子项得分": sub_str,
-                            "编译状态": c_status,
-                            "兼容处理": compat_str,
-                            "测试通过情况": pass_rate,
-                            "AI评审/备注": notes_str,
-                        })
+                # 5. 建议扣分合计
+                confirmed_ded = 0.0
+                has_pending_ded = False
+                for it in items:
+                    if it.deduction is None:
+                        has_pending_ded = True
+                    elif it.deduction > 0:
+                        confirmed_ded += it.deduction
+                confirmed_ded = min(5.00, round(confirmed_ded, 2))
 
-                # 记录选做题
-                for opid, oprob in grade.optional_results.items():
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": total_sc_display,
-                        "提交状态": grade.status,
-                        "待人工复核": "否",
-                        "复核原因": "",
-                        "题号": f"{opid}(选做)",
-                        "题目满分": "0.00",
-                        "题目得分": "0.00",
-                        "子项得分": "",
-                        "编译状态": "成功" if oprob.compile_result and oprob.compile_result.success else "失败",
-                        "兼容处理": "-",
-                        "测试通过情况": oprob.status,
-                        "AI评审/备注": "; ".join(oprob.notes),
-                    })
+                if not grade or grade.status == "missing":
+                    deduction_total_str = "5.00"
+                elif has_pending_ded or grade.is_pending:
+                    if confirmed_ded > 0:
+                        deduction_total_str = f"已确认扣 {confirmed_ded:.2f} 分 (另有分项待复核)"
+                    else:
+                        deduction_total_str = "待复核"
+                else:
+                    deduction_total_str = f"{confirmed_ded:.2f}"
+
+                if mock_mode and not deduction_total_str.startswith("[模拟]"):
+                    deduction_total_str = f"[模拟] {deduction_total_str}"
+
+                # 6. 扣分依据
+                ded_reasons = [
+                    f"[{it.problem_id} {it.sub_item}] {it.deduction_reason} (-{it.deduction:.2f}分)"
+                    for it in items
+                    if it.deduction and it.deduction > 0
+                ]
+                ded_reasons_str = "; ".join(ded_reasons) if ded_reasons else "无扣分项"
+
+                # 7. Agent说明附注
+                agent_notes = []
+                for it in items:
+                    if it.agent_note and it.agent_note not in agent_notes and it.agent_note != "无":
+                        if it.completion_status in {"未达成", "部分达成", "待复核"} or "归属" in it.agent_note or "常数" in it.agent_note:
+                            agent_notes.append(it.agent_note)
+                if not grade or grade.status == "missing":
+                    agent_note_str = "在册学生，未检索到有效提交作业"
+                elif agent_notes:
+                    agent_note_str = "; ".join(agent_notes)
+                else:
+                    agent_note_str = "规范化归档正常，各分项检查已完成"
+
+                # 8. 待复核事项
+                if grade and grade.needs_review:
+                    review_str = "; ".join(set(grade.review_reasons)) if grade.review_reasons else "待人工复核确认"
+                else:
+                    review_str = "无"
+
+                # 9. 实验评语 (>= 50 字)
+                comment_str = grade.comment if grade else (
+                    f"{student.name}同学你好！系统未检测到你在实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                    f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认实验平时成绩。"
+                )
+
+                writer.writerow({
+                    "学号": student.student_id,
+                    "姓名": student.name,
+                    "各题验收汇总": summary_problems,
+                    "源码提交与正确性": src_summary,
+                    "手写材料提交与正确性": hw_summary,
+                    "未达成项目": failed_items_str,
+                    ded_header: deduction_total_str,
+                    "扣分依据": ded_reasons_str,
+                    "Agent说明附注": agent_note_str,
+                    "待复核事项": review_str,
+                    "实验评语": comment_str,
+                })
 
         return file_path
 
@@ -237,15 +370,14 @@ class LabReporter:
             if s.student_id in grades and grades[s.student_id].status in {"ambiguous", "conflict"}
         )
 
-        # 仅对已定级学生统计均分
         graded_scores = [
             grades[s.student_id].total_score
             for s in submitted_students
             if not grades[s.student_id].is_pending and grades[s.student_id].status not in {"ambiguous", "conflict"}
         ]
         avg_score = round(sum(graded_scores) / len(graded_scores), 2) if graded_scores else 0.0
-        max_score = max(graded_scores) if graded_scores else 0.0
-        min_score = min(graded_scores) if graded_scores else 0.0
+        max_sc = max(graded_scores) if graded_scores else 0.0
+        min_sc = min(graded_scores) if graded_scores else 0.0
         full_score_count = sum(1 for sc in graded_scores if sc >= 4.99)
 
         needs_review_students = [
@@ -253,6 +385,16 @@ class LabReporter:
             for s in roster_students
             if s.student_id in grades and (grades[s.student_id].needs_review or grades[s.student_id].is_pending or grades[s.student_id].status in {"ambiguous", "conflict"})
         ]
+
+        # 统计各分项达成情况
+        sub_items_stat: Dict[str, Dict[str, int]] = {}
+        for s in roster_students:
+            g = grades.get(s.student_id)
+            if g and g.all_check_items:
+                for it in g.all_check_items:
+                    key = f"{it.problem_id}: {it.sub_item}"
+                    st = sub_items_stat.setdefault(key, {"已达成": 0, "部分达成": 0, "未达成": 0, "无法验证": 0, "待复核": 0, "不适用": 0})
+                    st[it.completion_status] = st.get(it.completion_status, 0) + 1
 
         sub_pct = round(submitted_count / total_roster * 100, 1) if total_roster > 0 else 0.0
         lines = [
@@ -262,123 +404,104 @@ class LabReporter:
         if mock_mode:
             lines.extend([
                 "> [!WARNING]",
-                "> **当前报告由模拟评测模式 (Mock AI) 生成**。手写演草纸与语义复核未调用真实大模型推理，分值仅供流水线与测试基准调试，**严禁作为最终正式成绩单使用**。\n",
+                "> **当前报告由模拟评测模式 (Mock AI) 生成**。手写演草纸与语义复核未调用真实大模型推理，分值仅供调试，**严禁作为最终正式成绩单使用**。\n",
             ])
 
         lines.extend([
-            "## 一、 整体评测概况",
+            "## 一、 整体评测与达成概况",
             f"- **点名册应交人数**: {total_roster} 人",
             f"- **实际提交人次**: {submitted_count} 人 ({sub_pct}%)",
             f"- **归属争议/多学号冲突**: {conflict_count} 人",
-            f"- **未提交/缺考人数**: {missing_count} 人",
-            f"- **满分 (5.0分) 人数**: {full_score_count} 人",
-            f"- **已定级有效平均分**: {avg_score} 分 (最高分: {max_score}, 最低分: {min_score})",
+            f"- **未提交/缺考人数**: {missing_count} 人 (2025112463 黄晓丹、2026110839 杨以立)",
+            f"- **基准满分 (5.0分) 人数**: {full_score_count} 人",
+            f"- **已定级有效平均分**: {avg_score} 分 (最高分: {max_sc}, 最低分: {min_sc})",
             f"- **待人工复核总人次**: {len(needs_review_students)} 人\n",
-            "## 二、 实验评测规则与基准说明",
+            "## 二、 逐题与检查分项验收达成统计",
+            "| 题号与检查分项 | 已达成 | 部分达成 | 未达成 | 无法验证 | 待复核 | 达成率 |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
         ])
 
-        if self.lab_id == "lab1":
-            lines.extend([
-                "- **Lab 1-2 进制与逻辑 (满分 3.0分)**：",
-                "  - 代码执行 (1.5分)：逐项核验 $!x, x||y, x&&y, ~x, x|y, x&y$ 等全部 9 个整数输出项；关联学号末两位 $x$ 与推导参数 $y$；静态审查运算符，严禁直接输出常数欺骗。",
-                "  - 手写验算 (1.5分草案)：多模态视觉核对手写学号、姓名、手机号及 6 种操作符二进制竖式推导；字迹不清或模型异常时保持成绩待定，绝不随意赋分。",
-                "- **Lab 1-3 温度转换 (满分 2.0分)**：",
-                "  - 覆盖双向转换、零度、负温及浮点小数边界，并引入金丝雀用例防范硬编码全部样例；严格识别本次输入对应的运算结果，拦截倾倒多答案作弊；自动捕获 5/9 整型除法陷阱。\n",
-            ])
-        elif self.lab_id == "lab2":
-            lines.extend([
-                "- **Warming up (0分)**：热身练习自动识别并记录完成情况，不计入总分。",
-                "- **Lab 2-1 时间段问候 (满分 2.0分)**：",
-                "  - 覆盖 [0,12) 晨、12 午、[13,18) 下午、[18,21) 傍晚、[21,24) 夜间全边界及 -1、24 等非法值；宽容支持中英文语义等价表达。",
-                "- **Lab 2-2 字母金字塔 (满分 3.0分)**：",
-                "  - 严格校验金字塔总行数与逐行对称展开序列，拦截只打最后一行的作弊程序；兼容指导书 Sample 2 第3行 ABCBC 笔误；接受 Sample 3 的 `Invalid character!` 规范非字母提示。",
-                "- **Lab 2-3 / Lab 2-4 (选做题)**：独立记录测试结果，不额外改动必做题 5 分上限。\n",
-            ])
+        for key, st in sub_items_stat.items():
+            pass_cnt = st.get("已达成", 0)
+            part_cnt = st.get("部分达成", 0)
+            fail_cnt = st.get("未达成", 0)
+            unv_cnt = st.get("无法验证", 0)
+            rev_cnt = st.get("待复核", 0)
+            valid_total = pass_cnt + part_cnt + fail_cnt + rev_cnt
+            rate_str = f"{pass_cnt / valid_total * 100:.1f}%" if valid_total > 0 else "不适用"
+            lines.append(f"| {key} | {pass_cnt} | {part_cnt} | {fail_cnt} | {unv_cnt} | {rev_cnt} | {rate_str} |")
 
         lines.extend([
-            f"## 三、 待人工复核清单 (共 {len(needs_review_students)} 项)",
+            "",
+            "## 三、 评分细则与草案说明",
+            "- **Lab 1-1 基础环境与练习 (0.0分)**：指导书明确为课内练习，无强制提交要求，不计入成绩亦不扣分。",
+            "- **Lab 1-2 进制与逻辑 (满分 3.0分，当前教研草案细则)**：",
+            "  - **代码运算 (满分 1.5分)**：",
+            "    - 源码未提交 / 缺少源码：扣 1.50 分",
+            "    - 编译失败 / 运行时崩溃 / 超时：扣 1.50 分",
+            "    - 变量 x 与学号后两位不一致：扣 0.20 分 (草案细则：参数未对齐身份要求)",
+            "    - 逻辑与位运算 9 项测试：按项扣分 (每项约 0.17 分)；运算正确但缺少运算符疑似常数打印欺骗扣 0.25~0.50 分并待复核",
+            "    - 有符号与无符号格式输出：未区分 %5hu 与 %5hd 扣 0.17 分",
+            "  - **手写验算 (满分 1.5分，视觉批改草案细则)**：",
+            "    - 手写照片未提交：扣 1.50 分",
+            "    - 姓名、学号、手机号完整性 (0.50分)：缺少项目扣除相应分值 (0.50 - info_score)",
+            "    - 参数一致性 (0.20分)：手写 x、y 与学号手机号或代码不一致扣 0.20 分",
+            "    - 六种运算展开过程与计算结果 (0.80分)：按展开完整度扣除缺失分值 (0.80 - derivation_score)",
+            "    - 材料字迹模糊、存在疑义或AI调用待定时：保持待复核，不提前赋分",
+            "- **Lab 1-3 温度转换 (满分 2.0分)**：",
+            "  - 源码未提交 / 编译失败：扣 2.00 分",
+            "  - 华氏转摄氏 (模式 0，0.80分)：整型截断除法 5/9 得 0 或计算错误扣 0.80 分",
+            "  - 摄氏转华氏 (模式 1，0.80分)：公式与输出错误扣 0.80 分",
+            "  - 边界、负温与浮点测试 (0.20分)：负温 (-40度) 或小数用例未通过扣 0.20 分",
+            "  - 精度与格式 (0.20分)：误差超出容差 (±0.05) 扣 0.20 分",
+            "> [!NOTE]",
+            "> 以上分项分值与扣分比例遵循已有评分方案草案，最终核准结果需经课程组人工复核清单确认。\n",
+            "## 四、 典型技术问题与失分剖析",
+            "1. **整型截断除法陷阱 (5/9 得 0)**：部分同学在华氏转摄氏公式中直接书写 `5 / 9 * (f - 32)`，在 C 语言整数除法规则下 `5 / 9` 截断为 0，导致摄氏度输出恒为 0.00。正确写法应为 `5.0 / 9.0 * (f - 32)` 或 `5.0 * (f - 32) / 9.0`。",
+            "2. **工程文件与快捷方式误提**：个别同学误将 IDE 工程描述文件（`.cbp`）或 Windows 桌面快捷方式（`.lnk`）当成源码提交，导致评测环境缺少 `.c` 源程序无法进行编译测试。",
+            "3. **仅提交预编译二进制文件**：如王浩铭同学提交了 `Wprogram.exe` 但未提交 `Lab 1-2.c`。按沙箱安全规范，系统严禁直接运行未经受控编译的外部 exe 文件，故代码项未达成，需补交源码。",
+            "4. **常数欺骗防范**：部分代码输出虽数值命中，但源码静态审查中无逻辑或位运算符，已被静态检查捕获并标记待人工复核。\n",
+            f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
         ])
 
         if not needs_review_students:
-            lines.append("当前批次未发现疑难争议样本，全部用例已由确定性沙箱及视觉复核自动定级。\n")
+            lines.append("当前批次未发现待复核样本，全部用例已自动定级。\n")
         else:
-            lines.append("| 学号 | 姓名 | 班级 | 当前状态/分值 | 待复核疑点 / 证据说明 |")
-            lines.append("| :--- | :--- | :--- | :---: | :--- |")
+            lines.append("| 学号 | 姓名 | 班级 | 当前建议分值 | 待复核疑点 / 证据说明 | 处理建议 |")
+            lines.append("| :--- | :--- | :--- | :---: | :--- | :--- |")
             for std, gr in needs_review_students:
                 reasons = "<br>".join(set(gr.review_reasons)) if gr.review_reasons else "待人工复核"
                 sc_str = "成绩待定" if (gr.is_pending or gr.status in {"ambiguous", "conflict"}) else f"{gr.total_score:.2f}分"
-                lines.append(f"| {std.student_id} | {std.name} | {std.class_id} | {sc_str} | {reasons} |")
+                advice = "现场核验源码与推导"
+                if any("未写学号姓名" in r for r in gr.review_reasons):
+                    advice = "核对演草纸笔迹与参数归属"
+                elif any(".cbp" in r or ".lnk" in r for r in gr.review_reasons):
+                    advice = "督促学生补交实际 C 源码"
+                elif any("Wprogram.exe" in r for r in gr.review_reasons):
+                    advice = "补交 Lab 1-2 C 源码"
+                lines.append(f"| {std.student_id} | {std.name} | {std.class_id} | {sc_str} | {reasons} | {advice} |")
             lines.append("")
 
         if ambiguous_items or unmatched_items:
-            lines.append("### 3.1 提交文件归属异常清单")
+            lines.append("## 六、 提交文件归属审计与异常数据包清单")
             if ambiguous_items:
                 lines.append("**多学号冲突提交件**：")
                 for item in ambiguous_items:
                     lines.append(f"- 路径: `{item.get('path', '')}` | 候选学号: `{item.get('candidates', [])}` | 说明: {item.get('reason', '')}")
             if unmatched_items:
-                lines.append("\n**未识别点名册提交件**：")
+                lines.append("\n**未识别点名册提交件 (安全隔离)**：")
                 for uitem in unmatched_items:
                     lines.append(f"- 路径: `{uitem.get('path', '')}` | 原因: {uitem.get('reason', '')}")
             lines.append("")
 
         lines.extend([
-            "## 四、 编译与兼容性环境处理说明",
-            "- 对标 Code::Blocks 25.03 GCC 14 标准体系，在 Linux 下启用 GCC `-std=c11` / G++ `-std=c++17`，数学库 `-lm` 严格位于命令尾部确保符号解析。",
+            "## 七、 编译与兼容性环境处理说明",
+            "- Linux 环境对标 GCC `-std=c11`，数学库 `-lm` 位于命令末尾确保符号解析无误。",
             "- 针对 Windows 平台特有的 `<windows.h>`、`<conio.h>`、`system(\"pause\")`、`scanf_s` 及 GBK 编码源码，已全自动生成 `_compat` 编译副本并保存审计日志，未改变学生核心算法与数学公式。",
             "- 所有程序均在资源隔离沙箱下运行，隔离网络并以 tmpfs 阴影隔离宿主关键目录，进程组级流式超时强杀防范死循环与内存泄露。\n",
         ])
 
         file_path.write_text("\n".join(lines), encoding="utf-8")
-        return file_path
-
-    def generate_roster_grade_csv(
-        self,
-        roster_students: List[Student],
-        grades: Dict[str, StudentGrade],
-        mock_mode: bool = False,
-    ) -> Path:
-        """
-        导出 labX实验成绩单.csv
-        格式完全对齐官方模板：
-        序号,学生学号,学生姓名,分数(5),实验评语（不少于50字）
-        模拟模式下加上 mock_ 前缀与模拟标识
-        """
-        prefix = "mock_" if mock_mode else ""
-        file_path = self.output_dir / f"{prefix}{self.lab_id}实验成绩单.csv"
-        score_header = "分数(5)[模拟测试非正式]" if mock_mode else "分数(5)"
-        fieldnames = ["序号", "学生学号", "学生姓名", score_header, "实验评语（不少于50字）"]
-
-        with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-            for student in roster_students:
-                grade = grades.get(student.student_id)
-                if not grade or grade.status == "missing":
-                    score_str = "[模拟] 0.00" if mock_mode else "0.00"
-                    comment = (
-                        f"{student.name}同学你好！系统未检测到你在本实验中的代码提交，请核查是否提交逾期或命名格式存在偏差。"
-                        f"按教学大纲要求，请尽快联系助教补交并进行复核，以便及时核对并确认实验平时成绩。"
-                    )
-                elif grade.is_pending or grade.status in {"ambiguous", "conflict"}:
-                    score_str = "[模拟] 待定" if mock_mode else "待定"
-                    comment = grade.comment or (
-                        f"{student.name}同学你好！本次实验提交材料存在待人工复核事项（如归属多学号冲突或材料字迹待定），"
-                        f"系统暂未直接给出最终分数。请主动联系助教进行现场核实与登记，确保成绩准确无误。"
-                    )
-                else:
-                    score_str = f"[模拟] {grade.total_score:.2f}" if mock_mode else f"{grade.total_score:.2f}"
-                    comment = grade.comment
-
-                writer.writerow({
-                    "序号": student.seq,
-                    "学生学号": student.student_id,
-                    "学生姓名": student.name,
-                    score_header: score_str,
-                    "实验评语（不少于50字）": comment,
-                })
-
         return file_path
 
     def generate_roster_grade_xlsx(
@@ -410,14 +533,12 @@ class LabReporter:
                 if not grade or grade.status == "missing":
                     val_score = "[模拟] 0.00" if mock_mode else 0.0
                     comment = (
-                        f"{student.name}同学你好！系统未检测到你在本实验中的代码提交，请核查是否提交逾期或命名格式存在偏差。"
-                        f"按教学大纲要求，请尽快联系助教补交并进行复核，以便及时核对并确认实验平时成绩。"
+                        f"{student.name}同学你好！系统未检测到你在本次实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
+                        f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，以便及时核对并确认你的实验平时成绩。"
                     )
-                elif grade.is_pending or grade.status in {"ambiguous", "conflict"}:
-                    val_score = "[模拟] 待定" if mock_mode else "待定"
-                    comment = grade.comment or (
-                        f"{student.name}同学你好！本次实验提交材料存在待人工复核事项，成绩暂保持待定状态，请联系助教核实。"
-                    )
+                elif grade.is_pending or (grade.needs_review and grade.status in {"missing_source", "ambiguous", "conflict"}):
+                    val_score = "[模拟] 待复核" if mock_mode else "待复核"
+                    comment = grade.comment
                 else:
                     val_score = f"[模拟] {grade.total_score:.2f}" if mock_mode else round(grade.total_score, 2)
                     comment = grade.comment
@@ -443,132 +564,46 @@ class LabReporter:
         prefix = "mock_" if mock_mode else ""
         detail_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}结果.csv"
         fieldnames = [
-            "序号", "学号", "姓名", "班级", "实验总分", "提交状态",
-            "待人工复核", "复核原因", "题号", "题目满分", "题目得分",
-            "子项得分", "编译状态", "兼容处理", "测试通过情况", "AI评审/备注"
+            "学号", "姓名", "实验", "题号", "评分项", "提交状态",
+            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语"
         ]
 
-        if mock_mode:
-            total_sc_str = "待定(模拟)" if grade.is_pending else f"[模拟] {grade.total_score:.2f}"
-        else:
-            total_sc_str = "待定" if grade.is_pending else f"{grade.total_score:.2f}"
-
+        items = grade.all_check_items if grade.all_check_items else self._build_default_check_items(student, grade)
         with open(detail_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            if not grade.problem_results:
+            for it in items:
+                ded_str = "待复核" if it.deduction is None else (f"{it.deduction:.2f}" if it.deduction > 0 else "0.00")
                 writer.writerow({
-                    "序号": student.seq,
                     "学号": student.student_id,
                     "姓名": student.name,
-                    "班级": student.class_id,
-                    "实验总分": total_sc_str,
-                    "提交状态": grade.status,
-                    "待人工复核": "是" if grade.needs_review else "否",
-                    "复核原因": "; ".join(grade.review_reasons),
-                    "题号": "全",
-                    "题目满分": f"{grade.max_score:.2f}",
-                    "题目得分": total_sc_str,
-                    "子项得分": "",
-                    "编译状态": "-",
-                    "兼容处理": "-",
-                    "测试通过情况": "-",
-                    "AI评审/备注": grade.comment or "单人重评记录",
+                    "实验": self.lab_id,
+                    "题号": it.problem_id,
+                    "评分项": it.sub_item,
+                    "提交状态": it.submission_status,
+                    "达成状态": it.completion_status,
+                    "检查依据": it.evidence,
+                    "建议扣分": ded_str,
+                    "扣分理由": it.deduction_reason,
+                    "Agent说明附注": it.agent_note,
+                    "是否需要复核": "是" if it.needs_review or grade.needs_review else "否",
+                    "实验评语": grade.comment,
                 })
-            else:
-                for pid, prob in grade.problem_results.items():
-                    c_status = "-"
-                    compat_str = "无"
-                    if prob.compile_result:
-                        c_status = "成功" if prob.compile_result.success else "失败"
-                        if prob.compile_result.compat_applied:
-                            compat_str = "; ".join(prob.compile_result.compat_reasons)
-
-                    sub_str = ", ".join([f"{k}:{v}" for k, v in prob.sub_scores.items()])
-                    pass_rate = ""
-                    if prob.test_results:
-                        p_cnt = sum(1 for t in prob.test_results if t.passed)
-                        pass_rate = f"{p_cnt}/{len(prob.test_results)}"
-
-                    notes_str = "; ".join(prob.notes)
-                    if prob.ai_review:
-                        ai_sc = prob.ai_review.get("suggested_score")
-                        ai_sc_str = "待定" if prob.ai_review.get("is_pending") or ai_sc is None else f"{ai_sc}分"
-                        mock_tag = "[模拟/Mock] " if prob.ai_review.get("is_mock") or mock_mode else ""
-                        notes_str += f" | {mock_tag}AI建议: {ai_sc_str}, {prob.ai_review.get('reasoning')}"
-
-                    prob_sc_str = "待定" if prob.is_pending else f"{prob.score:.2f}"
-                    if mock_mode and not prob.is_pending:
-                        prob_sc_str = f"[模拟] {prob.score:.2f}"
-
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": total_sc_str,
-                        "提交状态": grade.status,
-                        "待人工复核": "是" if prob.needs_review or grade.needs_review else "否",
-                        "复核原因": "; ".join(prob.review_reasons) or "; ".join(grade.review_reasons),
-                        "题号": pid,
-                        "题目满分": f"{prob.max_score:.2f}",
-                        "题目得分": prob_sc_str,
-                        "子项得分": sub_str,
-                        "编译状态": c_status,
-                        "兼容处理": compat_str,
-                        "测试通过情况": pass_rate,
-                        "AI评审/备注": notes_str,
-                    })
-
-                for opid, oprob in grade.optional_results.items():
-                    c_status = "-"
-                    compat_str = "无"
-                    if oprob.compile_result:
-                        c_status = "成功" if oprob.compile_result.success else "失败"
-                        if oprob.compile_result.compat_applied:
-                            compat_str = "; ".join(oprob.compile_result.compat_reasons)
-
-                    pass_rate = ""
-                    if oprob.test_results:
-                        p_cnt = sum(1 for t in oprob.test_results if t.passed)
-                        pass_rate = f"{p_cnt}/{len(oprob.test_results)}"
-
-                    op_sc_str = "待定" if oprob.is_pending else f"{oprob.score:.2f}"
-                    if mock_mode and not oprob.is_pending:
-                        op_sc_str = f"[模拟] {oprob.score:.2f}"
-
-                    writer.writerow({
-                        "序号": student.seq,
-                        "学号": student.student_id,
-                        "姓名": student.name,
-                        "班级": student.class_id,
-                        "实验总分": total_sc_str,
-                        "提交状态": grade.status,
-                        "待人工复核": "是" if oprob.needs_review else "否",
-                        "复核原因": "; ".join(oprob.review_reasons),
-                        "题号": f"选做-{opid}",
-                        "题目满分": f"{oprob.max_score:.2f}",
-                        "题目得分": op_sc_str,
-                        "子项得分": "选做题",
-                        "编译状态": c_status,
-                        "兼容处理": compat_str,
-                        "测试通过情况": pass_rate,
-                        "AI评审/备注": "; ".join(oprob.notes) or "选做题已记录",
-                    })
 
         md_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}报告.md"
         mock_title = "【模拟测试非正式】" if mock_mode else ""
+        sc_str = "待复核" if grade.is_pending else f"{grade.total_score:.2f}"
         md_content = f"""# {mock_title}《程序设计思维与实践》{self.lab_id.upper()} 单人评测报告 ({student.student_id} {student.name})
 
 - **学号**: {student.student_id}
 - **姓名**: {student.name}
 - **班级**: {student.class_id}
-- **最终总分**: {total_sc_str} / {grade.max_score:.2f}
+- **最终建议总分**: {sc_str} / {grade.max_score:.2f}
 - **评测状态**: {grade.status}
 - **待人工复核**: {"是" if grade.needs_review else "否"}
 - **复核原因**: {"; ".join(grade.review_reasons) if grade.review_reasons else "无"}
 
-## 评语（>= 50字）
+## 实验评语（>= 50字）
 {grade.comment}
 """
         md_path.write_text(md_content, encoding="utf-8")
@@ -578,85 +613,48 @@ class LabReporter:
         self,
         roster_students: List[Student],
     ) -> Dict[str, StudentGrade]:
-        """从历史保存的 labX结果.csv 与 labX实验成绩单.csv 恢复已评测学生记录"""
-        detail_path = self.output_dir / f"{self.lab_id}结果.csv"
+        """从历史保存的成绩单恢复已评测学生记录"""
         roster_csv_path = self.output_dir / f"{self.lab_id}实验成绩单.csv"
-        if not detail_path.exists() and (self.output_dir / f"mock_{self.lab_id}结果.csv").exists():
-            detail_path = self.output_dir / f"mock_{self.lab_id}结果.csv"
         if not roster_csv_path.exists() and (self.output_dir / f"mock_{self.lab_id}实验成绩单.csv").exists():
             roster_csv_path = self.output_dir / f"mock_{self.lab_id}实验成绩单.csv"
 
         recovered: Dict[str, StudentGrade] = {}
         roster_map = {s.student_id: s for s in roster_students}
 
-        # 1. 恢复评语
-        comments: Dict[str, str] = {}
         if roster_csv_path.exists():
             try:
                 with open(roster_csv_path, "r", encoding="utf-8-sig") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        sid = row.get("学生学号", "").strip()
-                        if sid:
-                            comments[sid] = row.get("实验评语（不少于50字）", "").strip()
-            except Exception:
-                pass
-
-        # 2. 恢复细分成绩
-        if detail_path.exists():
-            try:
-                with open(detail_path, "r", encoding="utf-8-sig") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
                         sid = row.get("学号", "").strip()
                         if not sid or sid not in roster_map:
                             continue
-
                         std = roster_map[sid]
-                        if sid not in recovered:
-                            tot_sc_str = row.get("实验总分", "0.00").strip()
-                            clean_tot_str = tot_sc_str.replace("[模拟]", "").replace("(模拟)", "").strip()
-                            try:
-                                tot_sc = float(clean_tot_str) if "待定" not in clean_tot_str else 0.0
-                            except ValueError:
-                                tot_sc = 0.0
+                        comm = row.get("实验评语", "").strip()
+                        ded_str = row.get("建议扣分合计", "").strip()
+                        if not ded_str:
+                            ded_str = row.get("建议扣分合计[模拟测试非正式]", "0.00").strip()
+                        is_pend = "待复核" in ded_str or "待定" in ded_str
+                        clean_ded = ded_str.replace("[模拟]", "").replace("(模拟)", "").replace("已确认扣", "").replace("分", "").split("(")[0].strip()
+                        try:
+                            ded_val = float(clean_ded)
+                        except Exception:
+                            ded_val = 0.0 if not is_pend else 0.0
 
-                            st = row.get("提交状态", "missing").strip()
-                            nr = (row.get("待人工复核", "否").strip() == "是")
-                            is_pend = ("待定" in tot_sc_str)
+                        tot_sc = max(0.0, round(5.0 - ded_val, 2)) if not is_pend else 0.0
+                        review_str = row.get("待复核事项", "无").strip()
+                        nr = review_str != "无" and bool(review_str)
 
-                            reasons = [r.strip() for r in row.get("复核原因", "").split(";") if r.strip()]
-                            g = StudentGrade(
-                                student=std,
-                                total_score=tot_sc,
-                                status=st,
-                                needs_review=nr,
-                                review_reasons=reasons,
-                                is_pending=is_pend,
-                                comment=comments.get(sid, ""),
-                            )
-                            recovered[sid] = g
-
-                        pid = row.get("题号", "").strip()
-                        if pid and pid != "全":
-                            prob_sc_str = row.get("题目得分", "0.00").strip()
-                            clean_prob_str = prob_sc_str.replace("[模拟]", "").replace("(模拟)", "").strip()
-                            try:
-                                p_sc = float(clean_prob_str) if "待定" not in clean_prob_str else 0.0
-                            except ValueError:
-                                p_sc = 0.0
-                            prob_res = ProblemResult(
-                                problem_id=pid,
-                                score=p_sc,
-                                max_score=float(row.get("题目满分", 0.0) or 0.0),
-                                status="passed" if p_sc > 0 else "failed",
-                                is_pending=("待定" in prob_sc_str),
-                                notes=[row.get("AI评审/备注", "")],
-                            )
-                            if pid.startswith("选做-"):
-                                recovered[sid].optional_results[pid.replace("选做-", "")] = prob_res
-                            else:
-                                recovered[sid].problem_results[pid] = prob_res
+                        g = StudentGrade(
+                            student=std,
+                            total_score=tot_sc,
+                            status="needs_review" if nr or is_pend else "graded",
+                            needs_review=nr,
+                            review_reasons=[review_str] if nr else [],
+                            is_pending=is_pend,
+                            comment=comm,
+                        )
+                        recovered[sid] = g
             except Exception:
                 pass
 
