@@ -1075,6 +1075,186 @@ int main() {{
             self.assertEqual(item_info.completion_status, "已达成")
             self.assertFalse(item_info.needs_review)
 
+    def test_27_lab1_2_preamble_number_offset_robustness(self):
+        """测试 27: Lab 1-2 含有前置说明文字 (如 x=93,y=82) 时，9项运算数字不会发生错位"""
+        s = Student(seq=93, student_id="2026111193", name="测试生郭", class_id="26TS602")
+        judge = Lab1Judge()
+        build_dir = self.test_work / "build_preamble_test"
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        c_file = self.test_work / f"{s.student_id}_1-2.c"
+        c_file.write_text("""
+#include <stdio.h>
+int main() {
+    short x = 93, y = 82;
+    printf("x=%hd,y=%hd时的基本运算\\n", x, y);
+    printf("逻辑非: %10hd 逻辑或: %10hd 逻辑与: %10hd\\n", !x, x||y, x&&y);
+    printf("无符号取反: %10hu 按位或: %10hd 按位与: %10hd\\n", (unsigned short)~x, x|y, x&y);
+    printf("有符号取反: %10hd 按位或: %10hd 按位与: %10hd\\n", ~x, x|y, x&y);
+    return 0;
+}
+""")
+        files = [SubmissionFile(c_file, c_file.name, "c_source", "1-2")]
+        grade = judge.grade_student(s, files, build_dir, mock_ai=True)
+        res = grade.problem_results["1-2"]
+        self.assertEqual(res.sub_scores["code"], 1.5)
+        # 推导出的 y 必须为 82，绝不能是 65444 或其他错位值
+        self.assertNotIn("65444", "".join(res.notes))
+        self.assertIn("推导y=82", "".join(res.notes))
+
+    def test_28_lab1_3_menu_prompt_zero_not_int_div_bug(self):
+        """测试 28: Lab 1-3 菜单提示语中包含 0 时，正确计算不触发整数除法截断扣分"""
+        s = Student(seq=93, student_id="2026111193", name="测试生郭", class_id="26TS602")
+        judge = Lab1Judge()
+        build_dir = self.test_work / "build_menu_prompt_test"
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        c_file = self.test_work / f"{s.student_id}_1-3.c"
+        c_file.write_text("""
+#include <stdio.h>
+int main() {
+    int mode;
+    double val;
+    printf("0: Fahrenheit to Celsius\\n1: Celsius to Fahrenheit\\nPlease select mode and temp:\\n");
+    if (scanf("%d %lf", &mode, &val) == 2) {
+        if (mode == 0) {
+            double c = (val - 32.0) * 5.0 / 9.0;
+            printf("Result: %.2f C\\n", c);
+        } else {
+            double f = val * 9.0 / 5.0 + 32.0;
+            printf("Result: %.2f F\\n", f);
+        }
+    }
+    return 0;
+}
+""")
+        files = [SubmissionFile(c_file, c_file.name, "c_source", "1-3")]
+        grade = judge.grade_student(s, files, build_dir, mock_ai=True)
+        res = grade.problem_results["1-3"]
+        self.assertEqual(res.score, 2.0)
+        # 华氏转摄氏分项应全对，不扣 0.80 分
+        f2c_item = [it for it in res.check_items if it.sub_item == "华氏转摄氏计算"][0]
+        self.assertEqual(f2c_item.deduction, 0.0)
+        self.assertEqual(f2c_item.completion_status, "已达成")
+        self.assertNotIn("整型截断除法缺陷", f2c_item.deduction_reason)
+
+    def test_29_handwritten_partial_phone_no_penalty(self):
+        """测试 29: 演草纸参数与代码完全一致但未写全手机号，不予扣除参数分且不标记复核 (学号 2026110090 场景)"""
+        s = Student(seq=90, student_id="2026110090", name="测试生黄", class_id="260101")
+        exp_x = 90
+        deduced_y = 97
+
+        # 模拟旧 AI 缓存中因为未写全手机号而给出 0.15 分的记录
+        mock_ai_cache_entry = {
+            "task_id": "lab1_2_handwritten",
+            "student_id_observed": "2026110090",
+            "name_observed": "",
+            "phone_observed": "",
+            "x_observed": 90,
+            "y_observed": 97,
+            "info_score": 0.2,
+            "xy_match_score": 0.15,
+            "derivation_score": 0.8,
+            "suggested_score": 1.15,
+            "is_pending": False,
+            "reasoning": "纸面上方写有学号，但未标明姓名和手机号；参数 x=90, y=97 与预期一致，但未直接写明手机号故给0.15分",
+            "needs_review": False,
+            "review_reason": "",
+        }
+
+        normalized = HandwrittenReviewer.normalize_review_result(
+            mock_ai_cache_entry, s.student_id, s.name, exp_x, deduced_y=deduced_y
+        )
+        # 按照新规则：动态根据参数事实重算，参数满分 0.2，信息宽容 0.5，推导 0.8，总分 1.5
+        self.assertEqual(normalized["xy_match_score"], 0.2)
+        self.assertEqual(normalized["info_score"], 0.5)
+        self.assertEqual(normalized["suggested_score"], 1.5)
+        self.assertFalse(normalized["needs_review"])
+
+        judge = Lab1Judge()
+        build_dir = self.test_work / "build_hw_90_test"
+        build_dir.mkdir(parents=True, exist_ok=True)
+        img = self.test_work / "hw_90.png"
+        img.write_bytes(b"\xFF\xD8\xFF\xE0" + b"\x00" * 200)
+
+        from unittest.mock import patch
+        with patch("checker.ai.HandwrittenReviewer.review_images", return_value=normalized):
+            prob = judge._grade_lab1_2(s, [], [img], build_dir, mock_ai=False)
+            param_item = [it for it in prob.check_items if it.sub_item == "手写参数与身份及源码一致性"][0]
+            self.assertEqual(param_item.deduction, 0.0)
+            self.assertEqual(param_item.completion_status, "已达成")
+            self.assertFalse(param_item.needs_review)
+
+    def test_30_calculation_doubt_not_cleared_by_missing_info_leniency(self):
+        """测试 30: 演草纸存在计算存疑或字迹不清时，宽容规则不得清除复核标志"""
+        s = Student(seq=1, student_id="2026110001", name="测试生", class_id="260101")
+        mock_res = {
+            "task_id": "lab1_2_handwritten",
+            "student_id_observed": "",
+            "name_observed": "",
+            "phone_observed": "",
+            "x_observed": 1,
+            "y_observed": 88,
+            "info_score": 0.0,
+            "xy_match_score": 0.2,
+            "derivation_score": 0.4,
+            "suggested_score": 0.6,
+            "is_pending": False,
+            "reasoning": "未填写姓名，同时推导字迹不清，位运算推导过程存疑",
+            "needs_review": True,
+            "review_reason": "未填写姓名，同时推导字迹不清，运算过程存疑",
+        }
+
+        normalized = HandwrittenReviewer.normalize_review_result(
+            mock_res, s.student_id, s.name, 1, deduced_y=88
+        )
+        # 字迹不清/存疑必须保持复核，绝不能被误判为只有身份未注明而清除复核
+        self.assertTrue(normalized["needs_review"])
+        self.assertEqual(normalized["derivation_score"], 0.4)
+
+    def test_31_detail_csv_review_flag_strictly_localized(self):
+        """测试 31: 明细 CSV 中的复核标记必须严格限定于具体分项，不得扩散至全部 18 项"""
+        import csv
+        s = Student(seq=1, student_id="2026119999", name="复核测试生", class_id="260101")
+        roster = RosterManager()
+        roster.students = [s]
+        roster.by_id = {s.student_id: s}
+        roster.by_name = {s.name: [s]}
+
+        grade = StudentGrade(student=s, max_score=5.0)
+        grade.needs_review = True  # 学生级别标记需要复核
+        grade.status = "needs_review"
+
+        p1_1 = ProblemResult(problem_id="1-1", score=0.0, max_score=0.0)
+        from checker.models import CheckItem
+        p1_1.check_items = [
+            CheckItem(problem_id="1-1", sub_item="代码编写与执行", submission_status="不适用", completion_status="无需提交", evidence="无需提交", needs_review=False),
+            CheckItem(problem_id="1-1", sub_item="环境配置与认知", submission_status="不适用", completion_status="无需提交", evidence="无需提交", needs_review=False),
+        ]
+        p1_2 = ProblemResult(problem_id="1-2", score=2.5, max_score=3.0, needs_review=True)
+        p1_2.check_items = [
+            CheckItem(problem_id="1-2", sub_item="源码提交", submission_status="已提交", completion_status="已达成", evidence="main.c", needs_review=False),
+            CheckItem(problem_id="1-2", sub_item="演草纸学生身份一致性", submission_status="已提交", completion_status="未达成", evidence="身份冲突", needs_review=True),
+        ]
+        grade.problem_results["1-1"] = p1_1
+        grade.problem_results["1-2"] = p1_2
+
+        out_dir = self.test_work / "out_reporter_localize"
+        reporter = LabReporter("lab1", out_dir)
+        reporter.generate_detail_csv([s], {s.student_id: grade})
+
+        csv_file = out_dir / "lab1结果.csv"
+        self.assertTrue(csv_file.exists())
+        with open(csv_file, "r", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+            item_map = {r["评分项"]: r["是否需要复核"] for r in rows}
+            # 1-1 的无需提交项绝对不能为“是”
+            self.assertEqual(item_map["代码编写与执行"], "否")
+            self.assertEqual(item_map["环境配置与认知"], "否")
+            self.assertEqual(item_map["源码提交"], "否")
+            # 唯独标记了 needs_review 的项才为“是”
+            self.assertEqual(item_map["演草纸学生身份一致性"], "是")
+
 
 if __name__ == "__main__":
     unittest.main()
