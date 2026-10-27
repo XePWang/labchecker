@@ -135,6 +135,8 @@ class Lab2Judge(BaseLabJudge):
         p2_3_sources = [f.path for f in files if f.matched_problem == "2-3" and f.file_type in {"c_source", "cpp_source"}]
         p2_4_sources = [f.path for f in files if f.matched_problem == "2-4" and f.file_type in {"c_source", "cpp_source"}]
 
+        corrupt_archives = [f for f in files if f.file_type == "corrupt_archive"]
+
         # 1. 记录 Warmup 热身情况 (0分)
         if warmup_files:
             grade.problem_results["warmup"] = ProblemResult(
@@ -147,11 +149,11 @@ class Lab2Judge(BaseLabJudge):
             )
 
         # 2. 评测 Lab 2-1 (2.0分)
-        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled)
+        res2_1 = self._grade_lab2_1(student, p2_1_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives)
         grade.problem_results["2-1"] = res2_1
 
         # 3. 评测 Lab 2-2 (3.0分)
-        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai, precompiled=precompiled)
+        res2_2 = self._grade_lab2_2(student, p2_2_sources, student_build_dir, mock_ai, precompiled=precompiled, corrupt_archives=corrupt_archives)
         grade.problem_results["2-2"] = res2_2
 
         # 4. 评测选做题 Lab 2-3 与 2-4 (独立记录完成情况)
@@ -175,6 +177,10 @@ class Lab2Judge(BaseLabJudge):
         elif not files:
             grade.status = "missing"
             grade.total_score = 0.0
+        elif all(f.file_type == "corrupt_archive" for f in files):
+            grade.status = "needs_review"
+            grade.needs_review = True
+            grade.total_score = 0.0
         elif res2_1.status == "compile_error" and res2_2.status == "compile_error":
             grade.status = "compile_error"
         elif grade.needs_review:
@@ -193,13 +199,20 @@ class Lab2Judge(BaseLabJudge):
         build_dir: Path,
         mock_ai: bool,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
+        corrupt_archives: Optional[List[SubmissionFile]] = None,
     ) -> ProblemResult:
         """评测 Lab 2-1：时间段问候 (2.0分)"""
         prob = ProblemResult(problem_id="2-1", score=0.0, max_score=2.0, source_files=sources)
 
         if not sources:
-            prob.status = "missing"
-            prob.notes.append("未提交 Lab 2-1 源码")
+            if corrupt_archives:
+                prob.status = "needs_review"
+                prob.needs_review = True
+                prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
+                prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-1 源码无法验证")
+            else:
+                prob.status = "missing"
+                prob.notes.append("未提交 Lab 2-1 源码")
             return prob
 
         total_cases = len(self.lab2_1_cases)
@@ -348,6 +361,7 @@ class Lab2Judge(BaseLabJudge):
         build_dir: Path,
         mock_ai: bool,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
+        corrupt_archives: Optional[List[SubmissionFile]] = None,
     ) -> ProblemResult:
         """
         评测 Lab 2-2：字母金字塔 (3.0分)
@@ -357,8 +371,14 @@ class Lab2Judge(BaseLabJudge):
         prob = ProblemResult(problem_id="2-2", score=0.0, max_score=3.0, source_files=sources)
 
         if not sources:
-            prob.status = "missing"
-            prob.notes.append("未提交 Lab 2-2 源码")
+            if corrupt_archives:
+                prob.status = "needs_review"
+                prob.needs_review = True
+                prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
+                prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 2-2 源码无法验证")
+            else:
+                prob.status = "missing"
+                prob.notes.append("未提交 Lab 2-2 源码")
             return prob
 
         # 测试用例: [(输入字符, 期望总行数, 最终行对称序列, 是否非字母测试)]
@@ -597,6 +617,10 @@ class Lab2Judge(BaseLabJudge):
 
         if grade.status == "missing":
             return f"{student.name}同学你好！系统未检测到你在实验2提交的有效源程序，请及时排查是否压缩包命名规范或未在截止时间前上传。请尽快联系助教补交，以确保本次实验平时成绩的有效录入。"
+
+        corrupt_reasons = [r for r in grade.review_reasons if "提交压缩包损坏" in r or "解压失败" in r]
+        if corrupt_reasons and grade.status == "needs_review":
+            return f"{student.name}同学你好！系统已检测并记录到你提交的实验2压缩包，但文件损坏无法正常解压，导致无法提取源码进行自动化评测；系统已保留你的提交记录并标记为待人工复核，请尽快联系课程助教重新提交有效的压缩包文件进行成绩复核。"
 
         if has_warmup:
             parts.append("积极完成了热身练习，编程态度值得表扬；")

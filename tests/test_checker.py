@@ -1444,5 +1444,55 @@ int main() {
         others_entries = [p for p in (lab_dir / "src" / "others").iterdir() if p.name != "README.md"]
         self.assertEqual(len(others_entries), 0)
 
+    def test_37_corrupt_archive_for_matched_student_not_missing(self):
+        """测试 37: 已确认学号的学生提交损坏压缩包，保留提交事实，记录解压失败待复核，不能转为未交(missing)"""
+        s = Student(seq=1, student_id="2026110001", name="张三", class_id="2612901")
+        roster = RosterManager()
+        roster.students = [s]
+        roster.by_id = {s.student_id: s}
+        roster.by_name = {s.name: [s]}
+
+        lab_dir = self.test_work / "lab_corrupt_archive"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        # 制作损坏的 zip (包含学号)
+        corrupt_zip = submit_dir / "2026110001_张三_实验1.zip"
+        corrupt_zip.write_bytes(b"PKCORRUPTED_ZIP_BYTES_NOT_VALID")
+
+        normalizer = SubmissionNormalizer(roster, "lab1", lab_dir)
+        student_files = normalizer.process_all_submissions()
+
+        # 确认未进入 others，且归属张三
+        self.assertIn("2026110001", student_files)
+        self.assertEqual(len(student_files["2026110001"]), 1)
+        sub_file = student_files["2026110001"][0]
+        self.assertEqual(sub_file.file_type, "corrupt_archive")
+        self.assertTrue((lab_dir / "src" / "2026110001" / corrupt_zip.name).exists())
+
+        others_entries = [p for p in (lab_dir / "src" / "others").iterdir() if p.name != "README.md"]
+        self.assertEqual(len(others_entries), 0)
+
+        # 进行 Lab 1 评分评测
+        judge = Lab1Judge()
+        grade = judge.grade_student(s, student_files["2026110001"], build_dir=lab_dir / "build" / s.student_id, mock_ai=True)
+
+        self.assertEqual(grade.status, "needs_review")
+        self.assertTrue(grade.needs_review)
+        self.assertNotEqual(grade.status, "missing")
+
+        # 验证各分项状态
+        items_1_2 = grade.problem_results["1-2"].check_items
+        sub_item_1_2 = next(it for it in items_1_2 if it.sub_item == "源码提交")
+        self.assertEqual(sub_item_1_2.submission_status, "已提交")
+        self.assertEqual(sub_item_1_2.completion_status, "无法验证")
+        self.assertEqual(sub_item_1_2.agent_note, "解压失败、内容无法验证、待复核")
+        self.assertTrue(sub_item_1_2.needs_review)
+
+        # 验证评语提及损坏解压失败及待人工复核
+        self.assertIn("损坏无法正常解压", grade.comment)
+        self.assertIn("待人工复核", grade.comment)
+        self.assertGreaterEqual(len(grade.comment), 50)
+
 if __name__ == "__main__":
     unittest.main()

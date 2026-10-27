@@ -140,6 +140,7 @@ class Lab1Judge(BaseLabJudge):
             mock_ai=mock_ai,
             projects=p1_3_projects,
             links=p1_3_links,
+            all_student_files=files,
             precompiled=precompiled,
         )
         grade.problem_results["1-3"] = res1_3
@@ -161,6 +162,10 @@ class Lab1Judge(BaseLabJudge):
             grade.total_score = 0.0
         elif all(f.file_type in {"project", "link", "executable"} for f in files) and not p1_2_images:
             grade.status = "missing_source"
+            grade.needs_review = True
+            grade.total_score = 0.0
+        elif all(f.file_type == "corrupt_archive" for f in files):
+            grade.status = "needs_review"
             grade.needs_review = True
             grade.total_score = 0.0
         elif res1_2.status == "compile_error" and res1_3.status == "compile_error":
@@ -322,6 +327,7 @@ class Lab1Judge(BaseLabJudge):
         all_files = all_student_files or []
 
         has_exe = any(f.file_type == "executable" for f in all_files)
+        corrupt_archives = [f for f in all_files if f.file_type == "corrupt_archive"]
 
         # 学号末两位预期值 x
         try:
@@ -345,7 +351,11 @@ class Lab1Judge(BaseLabJudge):
         exp_v1 = exp_v2 = exp_v3 = exp_v4 = exp_v5 = exp_v6 = exp_v7 = exp_v8 = exp_v9 = 0
 
         if not sources:
-            if projects:
+            if corrupt_archives:
+                prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
+                prob.needs_review = True
+                prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 1-2 源码及演算无法验证")
+            elif projects:
                 prob.notes.append("未找到 Lab 1-2 源码 (仅提交 Code::Blocks 工程文件 .cbp，缺少 .c 源码)")
                 prob.needs_review = True
                 prob.review_reasons.append("Lab 1-2 仅提交 .cbp 工程描述文件，缺少 C 源码")
@@ -583,6 +593,18 @@ class Lab1Judge(BaseLabJudge):
                 deduction_reason="",
                 agent_note=f"多候选已择优采用最高分版本: {src_path.name}" if len(sources) > 1 else "源码文件归档正常",
                 needs_review=False,
+            ))
+        elif corrupt_archives:
+            items.append(CheckItem(
+                problem_id="1-2",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="无法验证",
+                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败: {corrupt_archives[0].note or '解压异常'}",
+                deduction=1.50,
+                deduction_reason="提交压缩包损坏解压失败，Lab 1-2 源码无法验证，待人工复核",
+                agent_note="解压失败、内容无法验证、待复核",
+                needs_review=True,
             ))
         elif projects:
             items.append(CheckItem(
@@ -899,6 +921,18 @@ class Lab1Judge(BaseLabJudge):
                 agent_note="手写材料已提交",
                 needs_review=False,
             ))
+        elif corrupt_archives:
+            items.append(CheckItem(
+                problem_id="1-2",
+                sub_item="验算材料提交",
+                submission_status="已提交",
+                completion_status="无法验证",
+                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败，无法提取演草纸照片",
+                deduction=1.50,
+                deduction_reason="提交压缩包损坏解压失败，验算材料无法验证，待人工复核",
+                agent_note="解压失败、内容无法验证、待复核",
+                needs_review=True,
+            ))
         else:
             items.append(CheckItem(
                 problem_id="1-2",
@@ -1167,12 +1201,15 @@ class Lab1Judge(BaseLabJudge):
         mock_ai: bool,
         projects: Optional[List[Path]] = None,
         links: Optional[List[Path]] = None,
+        all_student_files: Optional[List[SubmissionFile]] = None,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
         """评测 Lab 1-3：温度转换 (2.0分)"""
         prob = ProblemResult(problem_id="1-3", score=0.0, max_score=2.0, source_files=sources)
         projects = projects or []
         links = links or []
+        all_files = all_student_files or []
+        corrupt_archives = [f for f in all_files if f.file_type == "corrupt_archive"]
 
         c_res: Optional[CompileResult] = None
         outputs_collected = []
@@ -1181,7 +1218,13 @@ class Lab1Judge(BaseLabJudge):
         total_cases = len(self.lab1_3_cases)
 
         if not sources:
-            if projects:
+            if corrupt_archives:
+                prob.status = "needs_review"
+                prob.score = 0.0
+                prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
+                prob.needs_review = True
+                prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 1-3 源码无法验证")
+            elif projects:
                 prob.status = "missing_source"
                 prob.score = 0.0
                 prob.notes.append("未提交 Lab 1-3 源码 (仅提交 Code::Blocks 工程描述文件 .cbp，缺少 .c 源码)")
@@ -1382,6 +1425,18 @@ class Lab1Judge(BaseLabJudge):
                 deduction_reason="",
                 agent_note=f"多候选已择优采用最高分版本: {src_path.name}" if len(sources) > 1 else "源码归档正常",
                 needs_review=False,
+            ))
+        elif corrupt_archives:
+            items.append(CheckItem(
+                problem_id="1-3",
+                sub_item="源码提交",
+                submission_status="已提交",
+                completion_status="无法验证",
+                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败: {corrupt_archives[0].note or '解压异常'}",
+                deduction=2.00,
+                deduction_reason="提交压缩包损坏解压失败，Lab 1-3 源码无法验证，待人工复核",
+                agent_note="解压失败、内容无法验证、待复核",
+                needs_review=True,
             ))
         elif projects:
             items.append(CheckItem(
@@ -1643,6 +1698,15 @@ class Lab1Judge(BaseLabJudge):
                 f"{student.name}同学你好！系统未检测到你在本次实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
                 f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，"
                 f"以便及时核对并确认你的实验平时成绩。"
+            )
+
+        # 损坏压缩包特殊评语
+        corrupt_reasons = [r for r in grade.review_reasons if "提交压缩包损坏" in r or "解压失败" in r]
+        if corrupt_reasons and grade.status == "needs_review":
+            return (
+                f"{student.name}同学你好！本次实验1已检测并记录到你提交的压缩包文件，但该文件损坏无法正常解压，"
+                f"导致评测机无法提取其中的源程序代码与演草纸材料进行自动化评测；系统已保留你的提交记录并标记为待人工复核，"
+                f"不会直接记为未交，请尽快联系课程助教重新提交有效的压缩包文件进行成绩复核。"
             )
 
         # 2. 仅提交项目描述文件 (.cbp) 或快捷方式 (.lnk) 缺少源码

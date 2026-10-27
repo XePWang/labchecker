@@ -25,9 +25,10 @@ class SubmissionFile:
     """提取或解压后的文件记录"""
     path: Path
     original_name: str
-    file_type: str  # c_source, cpp_source, image, archive, document, other
+    file_type: str  # c_source, cpp_source, image, archive, document, corrupt_archive, other
     matched_problem: Optional[str] = None  # 1-2, 1-3, 2-1, 2-2, 2-3, 2-4, warmup
     is_warmup: bool = False
+    note: str = ""
 
 
 @dataclass

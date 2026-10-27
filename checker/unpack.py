@@ -414,8 +414,23 @@ class SubmissionNormalizer:
                     unpack_dest.mkdir(parents=True, exist_ok=True)
                     success, msg, files = self.extractor.extract_archive(entry, unpack_dest, recursive=True)
                     if not success:
-                        item_record = self._archive_unattributed_item(entry, reason=f"解压失败: {msg}", candidates=[sid])
-                        self.unmatched_items.append(item_record)
+                        # 记录已收到该学生压缩包，但文件损坏无法解压，保留在学生目录中
+                        student_src_dir = self.src_dir / sid
+                        student_src_dir.mkdir(parents=True, exist_ok=True)
+                        dest_archive = student_src_dir / entry.name
+                        try:
+                            if not dest_archive.exists() or dest_archive.resolve() != entry.resolve():
+                                shutil.copy2(entry, dest_archive)
+                        except Exception:
+                            dest_archive = entry
+
+                        corrupt_file = SubmissionFile(
+                            path=dest_archive,
+                            original_name=entry.name,
+                            file_type="corrupt_archive",
+                            note=f"解压失败: {msg}",
+                        )
+                        self.student_files.setdefault(sid, []).append(corrupt_file)
                         continue
                     extracted_items = files
                     root_dir = unpack_dest
