@@ -629,12 +629,21 @@ class SemanticAmbiguityReviewer:
         hasher.update(input_data.encode("utf-8"))
         hasher.update(actual_output.encode("utf-8", errors="ignore"))
         hasher.update(source_code.encode("utf-8", errors="ignore"))
+        hasher.update(expected_behavior.encode("utf-8", errors="ignore"))
+        hasher.update(f"{max_score:.4f}".encode("utf-8"))
         cache_key = f"semantic_{hasher.hexdigest()}"
 
         cache = _load_ai_cache()
         if cache_key in cache:
-            cached_res = cache[cache_key]
+            cached_res = dict(cache[cache_key])
             if not cached_res.get("is_pending"):
+                # 核验分值范围，确保不超过当前的 max_score，且不小于 0.0
+                if "suggested_score" in cached_res and cached_res["suggested_score"] is not None:
+                    try:
+                        orig_sc = float(cached_res["suggested_score"])
+                        cached_res["suggested_score"] = max(0.0, min(max_score, orig_sc))
+                    except (ValueError, TypeError):
+                        pass
                 return cached_res
 
         prompt = f"""

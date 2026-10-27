@@ -1494,5 +1494,58 @@ int main() {
         self.assertIn("待人工复核", grade.comment)
         self.assertGreaterEqual(len(grade.comment), 50)
 
+    def test_38_semantic_cache_invalidates_on_requirements_change_and_clamps(self):
+        """测试 38: 语义复核缓存键包含 expected_behavior 与 max_score，并在命中后核验分值范围"""
+        import hashlib
+        from checker.ai import SemanticAmbiguityReviewer, _load_ai_cache, _save_ai_cache
+
+        # 计算相同输入、不同 expected_behavior 或不同 max_score 时的缓存键
+        def get_cache_key(expected: str, max_sc: float) -> str:
+            hasher = hashlib.md5()
+            hasher.update("2-1".encode("utf-8"))
+            hasher.update("2026000001".encode("utf-8"))
+            hasher.update("12\n".encode("utf-8"))
+            hasher.update("Noon".encode("utf-8"))
+            hasher.update("".encode("utf-8"))
+            hasher.update(expected.encode("utf-8"))
+            hasher.update(f"{max_sc:.4f}".encode("utf-8"))
+            return f"semantic_{hasher.hexdigest()}"
+
+        key1 = get_cache_key("Noon\n", 2.0)
+        key2 = get_cache_key("Different\n", 2.0)
+        key3 = get_cache_key("Noon\n", 0.1)
+
+        self.assertNotEqual(key1, key2, "期望输出变化应使缓存失效")
+        self.assertNotEqual(key1, key3, "最高分要求变化应使缓存失效")
+
+        # 测试缓存命中后的分值范围钳位
+        cache = _load_ai_cache()
+        cache[key1] = {
+            "task_id": "semantic_2-1",
+            "category": "format_difference",
+            "passed": True,
+            "suggested_score": 2.0,
+            "is_pending": False,
+            "reasoning": "format diff",
+            "needs_review": False,
+        }
+        _save_ai_cache(cache)
+
+        # 模拟 key3 在缓存中已有旧的 2.0 高分记录，核验命中后是否正确钳位至 0.1
+        cache[key3] = dict(cache[key1])
+        _save_ai_cache(cache)
+
+        res = SemanticAmbiguityReviewer.review_output(
+            problem_id="2-1",
+            student_id="2026000001",
+            input_data="12\n",
+            expected_behavior="Noon\n",
+            actual_output="Noon",
+            source_code="",
+            max_score=0.1,
+            mock_mode=False,
+        )
+        self.assertAlmostEqual(res["suggested_score"], 0.1, places=2)
+
 if __name__ == "__main__":
     unittest.main()
