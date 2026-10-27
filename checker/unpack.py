@@ -33,6 +33,11 @@ IGNORED_PATTERNS = {
 # 保留目录 (不能将它们识别为学生目录或参与编译)
 RESERVED_DIRS = {"others", "__MACOSX"}
 
+# 手动确认归属清单 (例如教师或助教与学生核验澄清后的散放文件直接确认归属)
+MANUAL_ATTRIBUTIONS: Dict[str, str] = {
+    "68cbd4b92caa5a802f170c2c28b6fcb1.jpg": "2026110214",  # 胡杨树 (手机号末位26，纸面演算x=14,y=26已人工核验确认)
+}
+
 
 def sanitize_filename(filename: str) -> str:
     """解决 Windows 压缩包在 Linux 下提取可能产生的文件名乱码问题"""
@@ -307,6 +312,14 @@ class SubmissionNormalizer:
                 continue
 
             student, candidates, reason = self.roster.match_student_from_text(entry.name)
+
+            # 检查手动人工核验清单
+            if not student and entry.name in MANUAL_ATTRIBUTIONS:
+                manual_sid = MANUAL_ATTRIBUTIONS[entry.name]
+                student = self.roster.find_student_by_id(manual_sid)
+                if student:
+                    candidates = [student]
+                    reason = f"人工核验确认归属: {manual_sid}"
 
             if len(candidates) > 1:
                 conflict_ids = [c.student_id for c in candidates]

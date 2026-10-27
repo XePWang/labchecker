@@ -1354,6 +1354,31 @@ int main() {
             self.assertEqual(res_serial[k].binary_path.name, res_parallel[k].binary_path.name)
             self.assertEqual(res_serial[k].compat_applied, res_parallel[k].compat_applied)
 
+    def test_34_manual_attribution_override(self):
+        """测试 34: 教师人工核实名单 (MANUAL_ATTRIBUTIONS) 散放文件直接归属，不触发推断待复核"""
+        s = Student(seq=1, student_id="2026110214", name="胡杨树", class_id="2612901")
+        roster = RosterManager()
+        roster.students = [s]
+        roster.by_id = {s.student_id: s}
+        roster.by_name = {s.name: [s]}
+
+        lab_dir = self.test_work / "lab_manual_attr"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        # 制作哈希散放图片
+        img_file = submit_dir / "68cbd4b92caa5a802f170c2c28b6fcb1.jpg"
+        img_file.write_bytes(b"fake_jpg_content" * 50)
+
+        normalizer = SubmissionNormalizer(roster, "lab1", lab_dir)
+        student_files = normalizer.process_all_submissions()
+
+        # 验证直接归属胡杨树，且未触发推断待复核标记
+        self.assertIn("2026110214", student_files)
+        self.assertEqual(len(student_files["2026110214"]), 1)
+        self.assertEqual(student_files["2026110214"][0].matched_problem, "1-2")
+        self.assertNotIn("2026110214", normalizer.inferred_students)
+
 
 if __name__ == "__main__":
     unittest.main()
