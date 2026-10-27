@@ -135,93 +135,125 @@ class Lab2Judge(BaseLabJudge):
             prob.notes.append("未提交 Lab 2-1 源码")
             return prob
 
-        src_path = sources[0]
-        if len(sources) > 1:
-            prob.notes.append(f"发现多份 2-1 源码候选，默认评测: {src_path.name}")
-            prob.needs_review = True
-            prob.review_reasons.append(f"同题多候选: {[s.name for s in sources]}")
+        total_cases = len(self.lab2_1_cases)
+        # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
+        cand_evaluations = []
+        for cand_idx, cand_src in enumerate(sources):
+            c_text = cand_src.read_text(encoding="utf-8", errors="ignore")
+            c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_1_cand_{cand_idx}")
+            c_results = []
+            c_notes = []
+            c_reviews = []
+            c_needs_review = False
+            c_is_pending = False
+            passed_cases = 0
 
-        src_text = src_path.read_text(encoding="utf-8", errors="ignore")
-        c_res = self.compiler.compile(src_path, build_dir, "lab2_1")
+            if not c_compile.success:
+                c_notes.append(f"Lab 2-1 ({cand_src.name}) 编译失败")
+            else:
+                for idx, (in_str, category, keywords) in enumerate(self.lab2_1_cases, 1):
+                    exec_res = run_binary(c_compile.binary_path, input_str=in_str, timeout=2.0)
+
+                    case_res = TestCaseResult(
+                        case_id=f"case_{idx}",
+                        input_data=in_str.strip(),
+                        expected_output=f"[{category}] 包含 {keywords[0]}",
+                        actual_output=exec_res.stdout.strip(),
+                        passed=False,
+                        score=0.0,
+                        max_score=round(2.0 / total_cases, 2),
+                        timed_out=exec_res.timed_out,
+                        exit_code=exec_res.exit_code,
+                    )
+
+                    if exec_res.timed_out:
+                        case_res.error_message = "运行超时"
+                    elif exec_res.exit_code != 0:
+                        case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
+                    else:
+                        out_lower = exec_res.stdout.lower()
+                        matched_kw = any(kw in out_lower for kw in keywords)
+
+                        # 必须避免 morning 误判包含 night 等反例
+                        conflict = False
+                        if category == "morning" and ("afternoon" in out_lower or "evening" in out_lower or "night" in out_lower):
+                            conflict = True
+                        elif category == "noon" and ("afternoon" in out_lower):
+                            conflict = True
+
+                        if matched_kw and not conflict:
+                            case_res.passed = True
+                            case_res.score = case_res.max_score
+                            passed_cases += 1
+                        else:
+                            # 确定性未命中，调用语义复核
+                            if idx == 1:
+                                ai_sem = SemanticAmbiguityReviewer.review_output(
+                                    problem_id="2-1",
+                                    student_id=student.student_id,
+                                    input_data=in_str,
+                                    expected_behavior=f"时间问候语义对齐 {category}",
+                                    actual_output=exec_res.stdout,
+                                    source_code=c_text,
+                                    max_score=case_res.max_score,
+                                    mock_mode=mock_ai,
+                                )
+                                if ai_sem.get("passed"):
+                                    case_res.passed = True
+                                    case_res.score = case_res.max_score
+                                    passed_cases += 1
+                                    c_notes.append(f"用例 {idx} 经 AI 语义复核确认问候语正确")
+                                elif ai_sem.get("is_pending"):
+                                    case_res.needs_review = True
+                                    sem_reason = ai_sem.get("review_reason") or "AI 语义复核超时或异常，判定待定"
+                                    case_res.review_reason = sem_reason
+                                    c_is_pending = True
+                                    c_needs_review = True
+                                    c_reviews.append(f"2-1 语义复核待定: {sem_reason}")
+                                    c_notes.append(f"用例 {idx} AI 语义复核待定: {sem_reason}")
+                                elif ai_sem.get("needs_review"):
+                                    case_res.needs_review = True
+                                    sem_reason = ai_sem.get("review_reason") or "AI 语义复核需人工介入"
+                                    case_res.review_reason = sem_reason
+                                    c_needs_review = True
+                                    c_reviews.append(f"2-1 需人工复核: {sem_reason}")
+
+                    c_results.append(case_res)
+
+            cand_score = round(2.0 * (passed_cases / total_cases), 2)
+            cand_evaluations.append({
+                "src_path": cand_src,
+                "score": cand_score,
+                "passed_cases": passed_cases,
+                "c_res": c_compile,
+                "test_results": c_results,
+                "notes": c_notes,
+                "reviews": c_reviews,
+                "needs_review": c_needs_review,
+                "is_pending": c_is_pending,
+                "success": c_compile.success,
+            })
+
+        best_eval = max(
+            cand_evaluations,
+            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0)
+        )
+        src_path = best_eval["src_path"]
+        c_res = best_eval["c_res"]
         prob.compile_result = c_res
+        prob.test_results = best_eval["test_results"]
+        passed_cases = best_eval["passed_cases"]
+        prob.notes.extend(best_eval["notes"])
+        if best_eval["needs_review"]:
+            prob.needs_review = True
+            prob.review_reasons.extend(best_eval["reviews"])
+        if best_eval["is_pending"]:
+            prob.is_pending = True
 
         if not c_res.success:
             prob.status = "compile_error"
             prob.notes.append("Lab 2-1 编译失败")
             return prob
-
-        passed_cases = 0
-        total_cases = len(self.lab2_1_cases)
-
-        for idx, (in_str, category, keywords) in enumerate(self.lab2_1_cases, 1):
-            exec_res = run_binary(c_res.binary_path, input_str=in_str, timeout=2.0)
-
-            case_res = TestCaseResult(
-                case_id=f"case_{idx}",
-                input_data=in_str.strip(),
-                expected_output=f"[{category}] 包含 {keywords[0]}",
-                actual_output=exec_res.stdout.strip(),
-                passed=False,
-                score=0.0,
-                max_score=round(2.0 / total_cases, 2),
-                timed_out=exec_res.timed_out,
-                exit_code=exec_res.exit_code,
-            )
-
-            if exec_res.timed_out:
-                case_res.error_message = "运行超时"
-            elif exec_res.exit_code != 0:
-                case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
-            else:
-                out_lower = exec_res.stdout.lower()
-                # 语义关键词匹配
-                matched_kw = any(kw in out_lower for kw in keywords)
-
-                # 必须避免 morning 误判包含 night 等反例
-                conflict = False
-                if category == "morning" and ("afternoon" in out_lower or "evening" in out_lower or "night" in out_lower):
-                    conflict = True
-                elif category == "noon" and ("afternoon" in out_lower):
-                    conflict = True
-
-                if matched_kw and not conflict:
-                    case_res.passed = True
-                    case_res.score = case_res.max_score
-                    passed_cases += 1
-                else:
-                    # 确定性未命中，调用语义复核
-                    if idx == 1:
-                        ai_sem = SemanticAmbiguityReviewer.review_output(
-                            problem_id="2-1",
-                            student_id=student.student_id,
-                            input_data=in_str,
-                            expected_behavior=f"时间问候语义对齐 {category}",
-                            actual_output=exec_res.stdout,
-                            source_code=src_text,
-                            max_score=case_res.max_score,
-                            mock_mode=mock_ai,
-                        )
-                        if ai_sem.get("passed"):
-                            case_res.passed = True
-                            case_res.score = case_res.max_score
-                            passed_cases += 1
-                            prob.notes.append(f"用例 {idx} 经 AI 语义复核确认问候语正确")
-                        elif ai_sem.get("is_pending"):
-                            case_res.needs_review = True
-                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核超时或异常，判定待定"
-                            case_res.review_reason = sem_reason
-                            prob.is_pending = True
-                            prob.needs_review = True
-                            prob.review_reasons.append(f"2-1 语义复核待定: {sem_reason}")
-                            prob.notes.append(f"用例 {idx} AI 语义复核待定: {sem_reason}")
-                        elif ai_sem.get("needs_review"):
-                            case_res.needs_review = True
-                            sem_reason = ai_sem.get("review_reason") or "AI 语义复核需人工介入"
-                            case_res.review_reason = sem_reason
-                            prob.needs_review = True
-                            prob.review_reasons.append(f"2-1 需人工复核: {sem_reason}")
-
-            prob.test_results.append(case_res)
 
         prob.score = round(2.0 * (passed_cases / total_cases), 2)
         if prob.is_pending:
@@ -235,6 +267,8 @@ class Lab2Judge(BaseLabJudge):
             prob.status = "failed"
 
         prob.notes.append(f"测试通过率: {passed_cases}/{total_cases}")
+        if len(sources) > 1:
+            prob.notes.append(f"检测到 {len(sources)} 份 2-1 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/2.00)")
         return prob
 
     def _grade_lab2_2(
@@ -256,20 +290,6 @@ class Lab2Judge(BaseLabJudge):
             prob.notes.append("未提交 Lab 2-2 源码")
             return prob
 
-        src_path = sources[0]
-        if len(sources) > 1:
-            prob.notes.append(f"发现多份 2-2 源码候选，默认评测: {src_path.name}")
-            prob.needs_review = True
-            prob.review_reasons.append(f"同题多候选: {[s.name for s in sources]}")
-
-        c_res = self.compiler.compile(src_path, build_dir, "lab2_2")
-        prob.compile_result = c_res
-
-        if not c_res.success:
-            prob.status = "compile_error"
-            prob.notes.append("Lab 2-2 编译失败")
-            return prob
-
         # 测试用例: [(输入字符, 期望总行数, 最终行对称序列, 是否非字母测试)]
         test_pyramids = [
             ("C\n", 3, "ABCBA", False),
@@ -279,96 +299,131 @@ class Lab2Judge(BaseLabJudge):
             ("1\n", 0, "ERROR", True),         # 常见非字母数字输入
             ("Z\n", 26, "ABCDEFGHIJKLMNOPQRSTUVWXYZYXWVUTSRQPONMLKJIHGFEDCBA", False),
         ]
-
-        passed_cases = 0
         total_cases = len(test_pyramids)
-        typo_detected = False
+        # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
+        cand_evaluations = []
+        for cand_idx, cand_src in enumerate(sources):
+            c_compile = self.compiler.compile(cand_src, build_dir, f"lab2_2_cand_{cand_idx}")
+            c_results = []
+            c_notes = []
+            passed_cases = 0
+            typo_detected = False
 
-        for idx, (in_char, exp_lines, exp_final_seq, is_error_test) in enumerate(test_pyramids, 1):
-            exec_res = run_binary(c_res.binary_path, input_str=in_char, timeout=2.0)
-
-            case_res = TestCaseResult(
-                case_id=f"case_{idx}",
-                input_data=in_char.strip(),
-                expected_output=f"行数={exp_lines}, 终行序列={exp_final_seq}" if not is_error_test else "非字母报错信息",
-                actual_output=exec_res.stdout.strip(),
-                passed=False,
-                score=0.0,
-                max_score=round(3.0 / total_cases, 2),
-                timed_out=exec_res.timed_out,
-                exit_code=exec_res.exit_code,
-            )
-
-            if exec_res.timed_out:
-                case_res.error_message = "运行超时"
-            elif exec_res.exit_code != 0:
-                case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
+            if not c_compile.success:
+                c_notes.append(f"Lab 2-2 ({cand_src.name}) 编译失败")
             else:
-                out_lines = [line for line in exec_res.stdout.splitlines() if line.strip()]
+                for idx, (in_char, exp_lines, exp_final_seq, is_error_test) in enumerate(test_pyramids, 1):
+                    exec_res = run_binary(c_compile.binary_path, input_str=in_char, timeout=2.0)
 
-                if is_error_test:
-                    out_lower = exec_res.stdout.lower()
-                    error_keywords = [
-                        "invalid character", "invalid", "not a letter", "not letter",
-                        "error", "非字母", "错误", "不是字母", "不合法", "无效"
-                    ]
-                    if any(w in out_lower for w in error_keywords):
-                        case_res.passed = True
-                        case_res.score = case_res.max_score
-                        passed_cases += 1
+                    case_res = TestCaseResult(
+                        case_id=f"case_{idx}",
+                        input_data=in_char.strip(),
+                        expected_output=f"行数={exp_lines}, 终行序列={exp_final_seq}" if not is_error_test else "非字母报错信息",
+                        actual_output=exec_res.stdout.strip(),
+                        passed=False,
+                        score=0.0,
+                        max_score=round(3.0 / total_cases, 2),
+                        timed_out=exec_res.timed_out,
+                        exit_code=exec_res.exit_code,
+                    )
+
+                    if exec_res.timed_out:
+                        case_res.error_message = "运行超时"
+                    elif exec_res.exit_code != 0:
+                        case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
                     else:
-                        case_res.error_message = "未能检测到非字母非法输入报错提示"
-                else:
-                    # 构造本用例各行的完整理论预期对称序列
-                    target_ch = in_char.strip().upper()
-                    n_lines = ord(target_ch) - ord('A') + 1
+                        out_lines = [line for line in exec_res.stdout.splitlines() if line.strip()]
 
-                    expected_rows = []
-                    for row_i in range(1, n_lines + 1):
-                        up = "".join(chr(ord('A') + j) for j in range(row_i))
-                        down = "".join(chr(ord('A') + j) for j in range(row_i - 2, -1, -1))
-                        expected_rows.append(up + down)
-
-                    # 提取纯英文字母行，过滤输入提示语干扰
-                    letter_rows = []
-                    for line in out_lines:
-                        clean_l = line.strip()
-                        if any(kw in clean_l.lower() for kw in ["input", "enter", "receiving", "请输入", "输入", "sample"]):
-                            continue
-                        seq = "".join(re.findall(r"[A-Za-z]", clean_l)).upper()
-                        if seq:
-                            letter_rows.append(seq)
-
-                    # 严格逐行验证：行数必须完全一致，且每行均需满足对称序列
-                    if len(letter_rows) == n_lines:
-                        all_rows_matched = True
-                        for r_idx in range(n_lines):
-                            exp_r = expected_rows[r_idx]
-                            actual_r = letter_rows[r_idx]
-                            if r_idx == 2:  # 第3行兼容指导书样例中的 ABCBC 笔误
-                                if actual_r == "ABCBC":
-                                    typo_detected = True
-                                if actual_r not in {"ABCBA", "ABCBC"}:
-                                    all_rows_matched = False
-                                    break
+                        if is_error_test:
+                            out_lower = exec_res.stdout.lower()
+                            error_keywords = [
+                                "invalid character", "invalid", "not a letter", "not letter",
+                                "error", "非字母", "错误", "不是字母", "不合法", "无效"
+                            ]
+                            if any(w in out_lower for w in error_keywords):
+                                case_res.passed = True
+                                case_res.score = case_res.max_score
+                                passed_cases += 1
                             else:
-                                if actual_r != exp_r:
-                                    all_rows_matched = False
-                                    break
-
-                        if all_rows_matched:
-                            case_res.passed = True
-                            case_res.score = case_res.max_score
-                            passed_cases += 1
+                                case_res.error_message = "未能检测到非字母非法输入报错提示"
                         else:
-                            case_res.error_message = f"行内容未严格对称展开 (提取内容: {letter_rows[:3]}...)"
-                    else:
-                        case_res.error_message = f"金字塔总行数不符预期: 期望{n_lines}行, 实际检测到{len(letter_rows)}行"
+                            # 构造本用例各行的完整理论预期对称序列
+                            target_ch = in_char.strip().upper()
+                            n_lines = ord(target_ch) - ord('A') + 1
 
-            prob.test_results.append(case_res)
+                            expected_rows = []
+                            for row_i in range(1, n_lines + 1):
+                                up = "".join(chr(ord('A') + j) for j in range(row_i))
+                                down = "".join(chr(ord('A') + j) for j in range(row_i - 2, -1, -1))
+                                expected_rows.append(up + down)
 
-        if typo_detected:
-            prob.notes.append("检测到输出匹配指导书样例笔误 ABCBC，已按课程容错规则判定通过")
+                            # 提取纯英文字母行，过滤输入提示语干扰
+                            letter_rows = []
+                            for line in out_lines:
+                                clean_l = line.strip()
+                                if any(kw in clean_l.lower() for kw in ["input", "enter", "receiving", "请输入", "输入", "sample"]):
+                                    continue
+                                seq = "".join(re.findall(r"[A-Za-z]", clean_l)).upper()
+                                if seq:
+                                    letter_rows.append(seq)
+
+                            # 严格逐行验证：行数必须完全一致，且每行均需满足对称序列
+                            if len(letter_rows) == n_lines:
+                                all_rows_matched = True
+                                for r_idx in range(n_lines):
+                                    exp_r = expected_rows[r_idx]
+                                    actual_r = letter_rows[r_idx]
+                                    if r_idx == 2:  # 第3行兼容指导书样例中的 ABCBC 笔误
+                                        if actual_r == "ABCBC":
+                                            typo_detected = True
+                                        if actual_r not in {"ABCBA", "ABCBC"}:
+                                            all_rows_matched = False
+                                            break
+                                    else:
+                                        if actual_r != exp_r:
+                                            all_rows_matched = False
+                                            break
+
+                                if all_rows_matched:
+                                    case_res.passed = True
+                                    case_res.score = case_res.max_score
+                                    passed_cases += 1
+                                else:
+                                    case_res.error_message = f"行内容未严格对称展开 (提取内容: {letter_rows[:3]}...)"
+                            else:
+                                case_res.error_message = f"金字塔总行数不符预期: 期望{n_lines}行, 实际检测到{len(letter_rows)}行"
+
+                    c_results.append(case_res)
+
+                if typo_detected:
+                    c_notes.append("检测到输出匹配指导书样例笔误 ABCBC，已按课程容错规则判定通过")
+
+            cand_score = round(3.0 * (passed_cases / total_cases), 2)
+            cand_evaluations.append({
+                "src_path": cand_src,
+                "score": cand_score,
+                "passed_cases": passed_cases,
+                "c_res": c_compile,
+                "test_results": c_results,
+                "notes": c_notes,
+                "success": c_compile.success,
+            })
+
+        best_eval = max(
+            cand_evaluations,
+            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0)
+        )
+        src_path = best_eval["src_path"]
+        c_res = best_eval["c_res"]
+        prob.compile_result = c_res
+        prob.test_results = best_eval["test_results"]
+        passed_cases = best_eval["passed_cases"]
+        prob.notes.extend(best_eval["notes"])
+
+        if not c_res.success:
+            prob.status = "compile_error"
+            prob.notes.append("Lab 2-2 编译失败")
+            return prob
 
         prob.score = round(3.0 * (passed_cases / total_cases), 2)
         if passed_cases == total_cases:
@@ -379,46 +434,63 @@ class Lab2Judge(BaseLabJudge):
             prob.status = "failed"
 
         prob.notes.append(f"测试通过率: {passed_cases}/{total_cases}")
+        if len(sources) > 1:
+            prob.notes.append(f"检测到 {len(sources)} 份 2-2 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/3.00)")
         return prob
 
     def _grade_lab2_3(self, student: Student, sources: List[Path], build_dir: Path) -> ProblemResult:
         """选做题 Lab 2-3：回文素数"""
         prob = ProblemResult(problem_id="2-3", score=0.0, max_score=0.0, source_files=sources)
-        c_res = self.compiler.compile(sources[0], build_dir, "lab2_3")
-        prob.compile_result = c_res
-        if c_res.success:
-            exec_res = run_binary(c_res.binary_path, input_str="5 500\n", timeout=5.0)
-            nums = [int(n) for n in re.findall(r"\b\d+\b", exec_res.stdout)]
-            expected = [5, 7, 11, 101, 131, 151, 181, 191, 313, 353, 373, 383]
-            if nums == expected:
-                prob.status = "passed"
-                prob.notes.append("选做题2-3回文素数测试完全正确")
-            else:
-                prob.status = "partial"
-                prob.notes.append(f"选做题2-3结果部分匹配 (输出 {len(nums)} 个回文素数)")
-        else:
-            prob.status = "compile_error"
+        best_status = "compile_error"
+        best_note = "选做题2-3未能编译通过"
+        best_c_res = None
+        for idx, src in enumerate(sources):
+            c_res = self.compiler.compile(src, build_dir, f"lab2_3_cand_{idx}")
+            if not best_c_res:
+                best_c_res = c_res
+            if c_res.success:
+                best_c_res = c_res
+                exec_res = run_binary(c_res.binary_path, input_str="5 500\n", timeout=5.0)
+                nums = [int(n) for n in re.findall(r"\b\d+\b", exec_res.stdout)]
+                expected = [5, 7, 11, 101, 131, 151, 181, 191, 313, 353, 373, 383]
+                if nums == expected:
+                    best_status = "passed"
+                    best_note = "选做题2-3回文素数测试完全正确"
+                    break
+                else:
+                    best_status = "partial"
+                    best_note = f"选做题2-3结果部分匹配 (输出 {len(nums)} 个回文素数)"
+        prob.status = best_status
+        prob.notes.append(best_note)
+        prob.compile_result = best_c_res
         return prob
 
     def _grade_lab2_4(self, student: Student, sources: List[Path], build_dir: Path) -> ProblemResult:
         """选做题 Lab 2-4：4:2 优先编码器"""
         prob = ProblemResult(problem_id="2-4", score=0.0, max_score=0.0, source_files=sources)
-        c_res = self.compiler.compile(sources[0], build_dir, "lab2_4")
-        prob.compile_result = c_res
-        if c_res.success:
-            # 测试 1010 -> 11, 0000 -> 非编码状态
-            res1 = run_binary(c_res.binary_path, input_str="1010\n", timeout=2.0)
-            res2 = run_binary(c_res.binary_path, input_str="0000\n", timeout=2.0)
-            ok1 = "11" in res1.stdout or "a3" in res1.stdout.lower()
-            ok2 = any(w in res2.stdout for w in ["没有", "非编码", "0", "flag=0", "inactive"])
-            if ok1 and ok2:
-                prob.status = "passed"
-                prob.notes.append("选做题2-4优先编码器功能测试完全正确")
-            else:
-                prob.status = "partial"
-                prob.notes.append("选做题2-4部分逻辑有偏差")
-        else:
-            prob.status = "compile_error"
+        best_status = "compile_error"
+        best_note = "选做题2-4未能编译通过"
+        best_c_res = None
+        for idx, src in enumerate(sources):
+            c_res = self.compiler.compile(src, build_dir, f"lab2_4_cand_{idx}")
+            if not best_c_res:
+                best_c_res = c_res
+            if c_res.success:
+                best_c_res = c_res
+                res1 = run_binary(c_res.binary_path, input_str="1010\n", timeout=2.0)
+                res2 = run_binary(c_res.binary_path, input_str="0000\n", timeout=2.0)
+                ok1 = "11" in res1.stdout or "a3" in res1.stdout.lower()
+                ok2 = any(w in res2.stdout for w in ["没有", "非编码", "0", "flag=0", "inactive"])
+                if ok1 and ok2:
+                    best_status = "passed"
+                    best_note = "选做题2-4优先编码器功能测试完全正确"
+                    break
+                else:
+                    best_status = "partial"
+                    best_note = "选做题2-4部分逻辑有偏差"
+        prob.status = best_status
+        prob.notes.append(best_note)
+        prob.compile_result = best_c_res
         return prob
 
     def generate_comment(self, grade: StudentGrade) -> str:
