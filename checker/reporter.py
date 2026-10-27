@@ -100,7 +100,7 @@ class LabReporter:
                     else:
                         ded_str = "0.00"
 
-                    rev_str = "是" if (it.needs_review or (grade and grade.needs_review)) else "否"
+                    rev_str = "是" if it.needs_review else "否"
 
                     writer.writerow({
                         "学号": student.student_id,
@@ -586,7 +586,7 @@ class LabReporter:
                     "建议扣分": ded_str,
                     "扣分理由": it.deduction_reason,
                     "Agent说明附注": it.agent_note,
-                    "是否需要复核": "是" if it.needs_review or grade.needs_review else "否",
+                    "是否需要复核": "是" if it.needs_review else "否",
                     "实验评语": grade.comment,
                 })
 
