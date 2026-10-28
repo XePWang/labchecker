@@ -224,6 +224,7 @@ class Lab1Judge(BaseLabJudge):
         stdout_str: str,
         expected_x: int,
         code_y: Optional[int] = None,
+        field_width: Optional[int] = None,
     ) -> Tuple[List[int], int, List[Tuple[str, bool, int, int]]]:
         """
         从可执行文件输出中鲁棒识别 Lab 1-2 的 9 项运算结果。
@@ -231,6 +232,18 @@ class Lab1Judge(BaseLabJudge):
         """
         all_numbers = [int(n) for n in re.findall(r"-?\d+", stdout_str)]
         candidates = []
+
+        # The guide prints fixed-width fields without separators. An extra
+        # printf field may touch the third result; only use field boundaries
+        # when the actual source corroborates their width.
+        if field_width:
+            rows = []
+            for line in stdout_str.splitlines():
+                fields = [line[i*field_width:(i+1)*field_width].strip() for i in range(3)]
+                if all(re.fullmatch(r"-?\d+", value) for value in fields):
+                    rows.append([int(value) for value in fields])
+            for i in range(len(rows)-2):
+                candidates.append(rows[i]+rows[i+1]+rows[i+2])
 
         # 1. 连续 9 个数字的滑动窗口
         if len(all_numbers) >= 9:
@@ -498,7 +511,8 @@ class Lab1Judge(BaseLabJudge):
                         all_numbers = [int(n) for n in re.findall(r"-?\d+", c_exec.stdout)]
                         if len(all_numbers) >= 9:
                             c_v_list, c_deduced_y, c_checks = self._extract_lab1_2_nine_terms(
-                                c_exec.stdout, expected_x, c_code_y
+                                c_exec.stdout, expected_x, c_code_y,
+                                field_width=5 if re.search(r'"(?:%5h[du]){3,}', clean_text) else None,
                             )
                             cv1, cv2, cv3, cv4, cv5, cv6, cv7, cv8, cv9 = c_v_list
 
@@ -803,20 +817,32 @@ class Lab1Judge(BaseLabJudge):
 
     @staticmethod
     def _temperature_result(stdout: str, conversion: str) -> Tuple[Optional[float], str]:
-        """优先取目标温标/结果标签的数值，否则取最后一个数，避免输入回显得分。"""
+        """Read the current result, accepting guide variable names and Chinese labels."""
         number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
-        target = r"摄氏(?:度|温度)?|celsius|centigrade|\bC\b" if conversion == "Centigrade" else r"华氏(?:度|温度)?|fahrenheit|\bF\b"
-        for label in [target, r"result|结果|转换(?:后)?(?:的)?(?:温度)?"]:
-            matches = list(re.finditer(rf"(?:{label})\s*(?:is|为|是|=|:|：)\s*({number})", stdout, re.I))
-            matches = [m for m in matches if not re.match(r"\s*[*/]", stdout[m.end():])]
-            if matches:
-                token = matches[-1].group(1)
-                return float(token), token
-        matches = list(re.finditer(number, stdout))
-        if not matches:
-            return None, ""
-        token = matches[-1].group(0)
-        return float(token), token
+        target = (r"摄氏(?:度|温度)?|celsius|centigrade|\bC\b" if conversion == "Centigrade"
+                  else r"华氏(?:度|温度)?|fahrenheit|fahrenherit|\bfahr\b|\bF\b")
+        marker = r"(?:(?:\bis\b|为|是)\s*[:：=]?\s*|[:：=]\s*)"
+        matches = []
+        for label in [r"result|结果|转换(?:后)?(?:的)?温度", target]:
+            for match in re.finditer(rf"(?:{label})\s*{marker}({number})", stdout, re.I):
+                if re.match(r"\s*[*/]", stdout[match.end():]):
+                    continue  # C=5*(F-32)/9 is a prompt formula, not a result.
+                # Menu descriptions such as 华氏度转摄氏度为0 identify a direction.
+                if match.group(1) in {"0","1","2","0.0","1.0","2.0"} and re.search(r"(?:转|to)\s*$",stdout[max(0,match.start()-12):match.start()],re.I):
+                    continue
+                matches.append((match.start(1),match.group(1)))
+        # Postfixed result units outrank earlier menu descriptions too.
+        unit = r"℃|°\s*C|摄氏度" if conversion == "Centigrade" else r"℉|°\s*F|华氏度"
+        for match in re.finditer(rf"({number})\s*(?:{unit})",stdout,re.I):
+            matches.append((match.start(1),match.group(1)))
+        if matches:
+            _,token=max(matches,key=lambda pair:pair[0])
+            return float(token),token
+        numbers=list(re.finditer(number,stdout))
+        if not numbers:
+            return None,""
+        token=numbers[-1].group(0)
+        return float(token),token
 
     @scored_problem("1-3")
     def _grade_lab1_3(

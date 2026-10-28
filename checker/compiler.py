@@ -191,6 +191,21 @@ def generate_compat_source(source_text: str) -> Tuple[str, List[str]]:
         new_lines.append(line)
 
     header_stubs = []
+    # Preserve Windows Sleep's millisecond delay in the Linux-only build copy.
+    # Do not remove the delay or change any student branch/formula.
+    if re.search(r'\bSleep\s*\(', source_text):
+        header_stubs.append(r'''/* [COMPAT SHIM] Windows Sleep(milliseconds) */
+#include <errno.h>
+#include <time.h>
+static void _labchecker_sleep(unsigned long milliseconds) {
+    struct timespec delay;
+    delay.tv_sec = (time_t)(milliseconds / 1000);
+    delay.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
+    while (nanosleep(&delay, &delay) == -1 && errno == EINTR) {}
+}
+#define Sleep _labchecker_sleep
+''')
+        reasons.append('将 Windows Sleep 毫秒等待映射为 POSIX nanosleep，保留原等待时长')
     if has_conio:
         header_stubs.append("/* Compat stubs for conio */\n#include <stdio.h>\n")
     if has_scanf_s:

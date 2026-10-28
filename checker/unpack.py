@@ -511,8 +511,7 @@ class SubmissionNormalizer:
         if not self.submit_dir.exists():
             return []
 
-        # 实验1批次严格排除补交包 TS602_殷裕鑫_2026112444_实验1.zip.zip，保留原文件不修改不解压
-        excluded_names = {"TS602_殷裕鑫_2026112444_实验1.zip.zip"} if self.lab_name == "lab1" else set()
+        # 补交包与原提交统一参与归档、独立评测和完整版本最高分选择。
 
         entries = sorted(list(self.submit_dir.iterdir()))
         items: List[Path] = []
@@ -520,7 +519,7 @@ class SubmissionNormalizer:
 
         def collect_from_dir(d: Path):
             for sub_item in sorted(list(d.iterdir())):
-                if sub_item.name.startswith(".") or sub_item.name in IGNORED_PATTERNS or sub_item.name in excluded_names:
+                if sub_item.name.startswith(".") or sub_item.name in IGNORED_PATTERNS:
                     continue
                 if sub_item.is_dir() and self._is_container_dir(sub_item):
                     collect_from_dir(sub_item)
@@ -531,7 +530,7 @@ class SubmissionNormalizer:
         container_dirs = []
         regular_entries = []
         for e in entries:
-            if e.name.startswith(".") or e.name in IGNORED_PATTERNS or e.name in excluded_names:
+            if e.name.startswith(".") or e.name in IGNORED_PATTERNS:
                 continue
             if e.is_dir() and self._is_container_dir(e):
                 container_dirs.append(e)
