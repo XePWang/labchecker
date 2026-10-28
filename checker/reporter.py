@@ -755,7 +755,7 @@ class LabReporter:
 
             for idx, student in enumerate(roster_students, start=3):
                 grade = grades.get(student.student_id)
-                if not grade or grade.status == "missing":
+                if not grade:
                     val_score = "[模拟] 0.00" if mock_mode else 0.0
                     if self.lab_id == "lab2":
                         comment = (
