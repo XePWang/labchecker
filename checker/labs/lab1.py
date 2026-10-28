@@ -350,6 +350,15 @@ class Lab1Judge(BaseLabJudge):
         v1 = v2 = v3 = v4 = v5 = v6 = v7 = v8 = v9 = 0
         exp_v1 = exp_v2 = exp_v3 = exp_v4 = exp_v5 = exp_v6 = exp_v7 = exp_v8 = exp_v9 = 0
 
+        # 预先调用视觉模型评测手写图片材料（若有图片），获取基础观察数据，后续由程序按不同候选进行参数匹配
+        ai_res_base = HandwrittenReviewer.review_images(
+            student_id=student.student_id,
+            student_name=student.name,
+            expected_x=expected_x,
+            image_paths=images,
+            mock_mode=mock_ai,
+        )
+
         if not sources:
             if corrupt_archives:
                 prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
@@ -370,6 +379,47 @@ class Lab1Judge(BaseLabJudge):
             else:
                 prob.notes.append("未找到 Lab 1-2 代码文件")
             prob.sub_scores["code"] = 0.0
+
+            ai_res = ai_res_base
+            prob.ai_review = ai_res
+            handwritten_score = 0.0
+            if ai_res.get("suggested_score") is not None:
+                handwritten_score = round(float(ai_res.get("suggested_score")), 2)
+            if ai_res.get("is_pending"):
+                prob.is_pending = True
+                prob.needs_review = True
+
+            hw_sid = str(ai_res.get("student_id_observed") or "").strip()
+            hw_name = str(ai_res.get("name_observed") or "").strip()
+            non_identity_values = {"未书写", "未提供", "缺失", "none", "null", "无", "未写", "n/a", "未知", "未提及"}
+            if hw_sid.lower() in non_identity_values:
+                hw_sid = ""
+            if hw_name.lower() in non_identity_values:
+                hw_name = ""
+
+            if hw_sid and hw_sid != str(student.student_id).strip():
+                prob.needs_review = True
+                prob.review_reasons.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
+                handwritten_score = 0.0
+
+            if hw_name and hw_name != str(student.name).strip():
+                prob.needs_review = True
+                prob.review_reasons.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
+                handwritten_score = min(handwritten_score, 0.8)
+
+            hw_x = ai_res.get("x_observed")
+            if hw_x is not None and hw_x != expected_x:
+                prob.needs_review = True
+                prob.review_reasons.append(f"参数矛盾: 演草纸手写 x={hw_x} 与学号后两位 {expected_x} 不符")
+
+            prob.sub_scores["handwritten"] = handwritten_score
+            prob.notes.append(f"演草纸批改: {ai_res.get('reasoning', '')}")
+
+            if ai_res.get("needs_review"):
+                prob.needs_review = True
+                prob.review_reasons.append(f"演草纸复核: {ai_res.get('review_reason', '')}")
+
+            prob.score = handwritten_score
         else:
             # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
             cand_evaluations = []
@@ -465,9 +515,79 @@ class Lab1Judge(BaseLabJudge):
                             c_notes.append(f"代码输出数字不足 9 个 (实际输出 {len(all_numbers)} 个)")
                             c_score = 0.2
 
+                if images:
+                    c_ai_res = HandwrittenReviewer.normalize_review_result(
+                        ai_res_base,
+                        student_id=student.student_id,
+                        student_name=student.name,
+                        expected_x=expected_x,
+                        deduced_y=c_deduced_y,
+                    )
+                    c_hw_score = 0.0
+                    if c_ai_res.get("suggested_score") is not None:
+                        c_hw_score = round(float(c_ai_res.get("suggested_score")), 2)
+                    c_hw_reviews = []
+                    c_hw_needs_review = bool(c_ai_res.get("needs_review"))
+                    c_hw_is_pending = bool(c_ai_res.get("is_pending"))
+
+                    hw_sid = str(c_ai_res.get("student_id_observed") or "").strip()
+                    hw_name = str(c_ai_res.get("name_observed") or "").strip()
+                    non_identity_values = {"未书写", "未提供", "缺失", "none", "null", "无", "未写", "n/a", "未知", "未提及"}
+                    if hw_sid.lower() in non_identity_values:
+                        hw_sid = ""
+                    if hw_name.lower() in non_identity_values:
+                        hw_name = ""
+
+                    if hw_sid and hw_sid != str(student.student_id).strip():
+                        c_hw_needs_review = True
+                        c_hw_reviews.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
+                        c_hw_score = 0.0
+
+                    if hw_name and hw_name != str(student.name).strip():
+                        c_hw_needs_review = True
+                        c_hw_reviews.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
+                        c_hw_score = min(c_hw_score, 0.8)
+
+                    hw_x = c_ai_res.get("x_observed")
+                    hw_y = c_ai_res.get("y_observed")
+                    hw_phone = c_ai_res.get("phone_observed")
+                    if hw_y is None and hw_phone:
+                        ph_digits = re.findall(r"\d+", str(hw_phone))
+                        if ph_digits and len(ph_digits[-1]) >= 2:
+                            try:
+                                hw_y = int(ph_digits[-1][-2:])
+                            except ValueError:
+                                pass
+
+                    if hw_x is not None and hw_x != expected_x:
+                        c_hw_needs_review = True
+                        c_hw_reviews.append(f"参数矛盾: 演草纸手写 x={hw_x} 与学号后两位 {expected_x} 不符")
+
+                    if hw_y is not None and c_deduced_y is not None and hw_y != c_deduced_y:
+                        c_hw_needs_review = True
+                        c_hw_reviews.append(f"参数矛盾: 代码 y={c_deduced_y} 与演草纸手写 y={hw_y} 不一致")
+                        if c_hw_score > 0:
+                            c_hw_score = max(0.0, round(c_hw_score - 0.2, 2))
+
+                    if c_ai_res.get("needs_review") and c_ai_res.get("review_reason"):
+                        c_hw_reviews.append(f"演草纸复核: {c_ai_res.get('review_reason')}")
+                    hw_y_match = (hw_y is None or c_deduced_y == hw_y)
+                else:
+                    c_ai_res = ai_res_base
+                    c_hw_score = 0.0
+                    c_hw_reviews = []
+                    c_hw_needs_review = False
+                    c_hw_is_pending = False
+                    hw_y_match = True
+
+                c_total_score = round(c_score + c_hw_score, 2)
                 cand_evaluations.append({
+                    "cand_idx": cand_idx,
                     "src_path": cand_src,
-                    "score": c_score,
+                    "total_score": c_total_score,
+                    "code_score": c_score,
+                    "handwritten_score": c_hw_score,
+                    "hw_y_match": 1 if hw_y_match else 0,
                     "c_res": c_compile,
                     "exec_res": c_exec,
                     "src_text": c_text,
@@ -479,23 +599,30 @@ class Lab1Judge(BaseLabJudge):
                     "checks": c_checks,
                     "v_list": c_v_list,
                     "notes": c_notes,
-                    "reviews": c_reviews,
-                    "needs_review": c_needs_review,
+                    "reviews": c_reviews + c_hw_reviews,
+                    "needs_review": c_needs_review or c_hw_needs_review,
+                    "is_pending": c_hw_is_pending,
+                    "ai_res": c_ai_res,
                     "success": c_compile.success,
                 })
 
-            # 择优采用最高分版本 (得分最高优先，若同分优先选参数对齐且编译成功的版本)
+            # 择优采用整题最终最高分版本 (满分 3.0，代码分 + 演算分综合择优，同分按稳定优先级排序)
             best_eval = max(
                 cand_evaluations,
                 key=lambda x: (
-                    x["score"],
+                    x["total_score"],
+                    x["code_score"],
+                    x["handwritten_score"],
                     1 if x["code_x_literal"] == expected_x else 0,
+                    x["hw_y_match"],
                     1 if x["has_logical"] and x["has_bitwise"] else 0,
-                    1 if x["success"] else 0
+                    1 if x["success"] else 0,
+                    -x["cand_idx"],
                 )
             )
             src_path = best_eval["src_path"]
-            code_score = best_eval["score"]
+            code_score = best_eval["code_score"]
+            handwritten_score = best_eval["handwritten_score"]
             c_res = best_eval["c_res"]
             exec_res = best_eval["exec_res"]
             src_text = best_eval["src_text"]
@@ -506,80 +633,50 @@ class Lab1Judge(BaseLabJudge):
             deduced_y = best_eval["deduced_y"]
             checks = best_eval["checks"]
             v1, v2, v3, v4, v5, v6, v7, v8, v9 = best_eval["v_list"]
+            ai_res = best_eval["ai_res"]
+
             prob.compile_result = c_res
             prob.sub_scores["code"] = code_score
+            prob.sub_scores["handwritten"] = handwritten_score
+            prob.ai_review = ai_res
             prob.notes.extend(best_eval["notes"])
             if best_eval["needs_review"]:
                 prob.needs_review = True
                 prob.review_reasons.extend(best_eval["reviews"])
+            if best_eval["is_pending"]:
+                prob.is_pending = True
+            if images and ai_res.get("reasoning"):
+                prob.notes.append(f"演草纸批改: {ai_res.get('reasoning')}")
+
+            prob.score = best_eval["total_score"]
+
+            prob.candidate_evaluations = [
+                {
+                    "index": c["cand_idx"],
+                    "src_path": str(c["src_path"]),
+                    "filename": c["src_path"].name,
+                    "total_score": c["total_score"],
+                    "code_score": c["code_score"],
+                    "handwritten_score": c["handwritten_score"],
+                    "compile_success": c["success"],
+                    "needs_review": c["needs_review"],
+                    "notes": c["notes"],
+                    "reviews": c["reviews"],
+                }
+                for c in cand_evaluations
+            ]
+            prob.chosen_candidate = {
+                "index": best_eval["cand_idx"],
+                "src_path": str(best_eval["src_path"]),
+                "filename": best_eval["src_path"].name,
+                "total_score": best_eval["total_score"],
+                "code_score": best_eval["code_score"],
+                "handwritten_score": best_eval["handwritten_score"],
+                "reason": f"整题最高分 ({best_eval['total_score']:.2f}/3.00)",
+            }
 
             if len(sources) > 1:
-                prob.notes.append(f"检测到 {len(sources)} 份 1-2 源码候选: {[s.name for s in sources]}，已择优采用最高分版本: {src_path.name} (代码得分: {code_score:.2f}/1.50)")
-
-        # --- B. 演草纸手写验算评测 (1.5分) ---
-        ai_res = HandwrittenReviewer.review_images(
-            student_id=student.student_id,
-            student_name=student.name,
-            expected_x=expected_x,
-            image_paths=images,
-            mock_mode=mock_ai,
-            deduced_y=deduced_y,
-        )
-        prob.ai_review = ai_res
-        handwritten_score = 0.0
-        if ai_res.get("suggested_score") is not None:
-            handwritten_score = round(float(ai_res.get("suggested_score")), 2)
-        if ai_res.get("is_pending"):
-            prob.is_pending = True
-            prob.needs_review = True
-
-        # 演草纸身份信息核查
-        hw_sid = str(ai_res.get("student_id_observed") or "").strip()
-        hw_name = str(ai_res.get("name_observed") or "").strip()
-        non_identity_values = {"未书写", "未提供", "缺失", "none", "null", "无", "未写", "n/a", "未知", "未提及"}
-        if hw_sid.lower() in non_identity_values:
-            hw_sid = ""
-        if hw_name.lower() in non_identity_values:
-            hw_name = ""
-
-        if hw_sid and hw_sid != str(student.student_id).strip():
-            prob.needs_review = True
-            prob.review_reasons.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
-            handwritten_score = 0.0
-
-        if hw_name and hw_name != str(student.name).strip():
-            prob.needs_review = True
-            prob.review_reasons.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
-            handwritten_score = min(handwritten_score, 0.8)
-
-        # 参数一致性交叉核对
-        hw_x = ai_res.get("x_observed")
-        hw_y = ai_res.get("y_observed")
-        hw_phone = ai_res.get("phone_observed")
-        if hw_y is None and hw_phone:
-            ph_digits = re.findall(r"\d+", str(hw_phone))
-            if ph_digits and len(ph_digits[-1]) >= 2:
-                try:
-                    hw_y = int(ph_digits[-1][-2:])
-                except ValueError:
-                    pass
-
-        if hw_x is not None and hw_x != expected_x:
-            prob.needs_review = True
-            prob.review_reasons.append(f"参数矛盾: 演草纸手写 x={hw_x} 与学号后两位 {expected_x} 不符")
-
-        if hw_y is not None and deduced_y is not None and hw_y != deduced_y:
-            prob.needs_review = True
-            prob.review_reasons.append(f"参数矛盾: 代码 y={deduced_y} 与演草纸手写 y={hw_y} 不一致")
-            if handwritten_score > 0:
-                handwritten_score = max(0.0, round(handwritten_score - 0.2, 2))
-
-        prob.sub_scores["handwritten"] = handwritten_score
-        prob.notes.append(f"演草纸批改: {ai_res.get('reasoning', '')}")
-
-        if ai_res.get("needs_review"):
-            prob.needs_review = True
-            prob.review_reasons.append(f"演草纸复核: {ai_res.get('review_reason', '')}")
+                prob.notes.append(f"检测到 {len(sources)} 份 1-2 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (整题得分: {best_eval['total_score']:.2f}/3.00, 代码: {code_score:.2f}, 手写: {handwritten_score:.2f})")
 
         # 汇总分数与题目状态
         prob.score = round(code_score + handwritten_score, 2)
@@ -1385,6 +1482,7 @@ class Lab1Judge(BaseLabJudge):
 
                 cand_score = sum(cr.score for cr in c_results)
                 cand_evaluations.append({
+                    "cand_idx": cand_idx,
                     "src_path": cand_src,
                     "score": cand_score,
                     "passed_cases": c_passed_cases,
@@ -1407,7 +1505,8 @@ class Lab1Judge(BaseLabJudge):
                     x["score"],
                     x["passed_cases"],
                     1 if x["success"] else 0,
-                    0 if x["has_int_div_bug"] else 1
+                    0 if x["has_int_div_bug"] else 1,
+                    -x["cand_idx"]
                 )
             )
             src_path = best_eval["src_path"]
@@ -1437,6 +1536,29 @@ class Lab1Judge(BaseLabJudge):
                 prob.status = "compile_error"
             else:
                 prob.status = "failed"
+
+            prob.candidate_evaluations = [
+                {
+                    "index": c["cand_idx"],
+                    "src_path": str(c["src_path"]),
+                    "filename": c["src_path"].name,
+                    "score": c["score"],
+                    "passed_cases": c["passed_cases"],
+                    "compile_success": c["success"],
+                    "needs_review": c["needs_review"],
+                    "notes": c["notes"],
+                    "reviews": c["reviews"],
+                }
+                for c in cand_evaluations
+            ]
+            prob.chosen_candidate = {
+                "index": best_eval["cand_idx"],
+                "src_path": str(best_eval["src_path"]),
+                "filename": best_eval["src_path"].name,
+                "score": best_eval["score"],
+                "passed_cases": best_eval["passed_cases"],
+                "reason": f"最高分版本 ({prob.score:.2f}/2.00, 通过率 {passed_cases}/{total_cases})",
+            }
 
             prob.notes.append(f"测试通过率: {passed_cases}/{total_cases}")
             if len(sources) > 1:

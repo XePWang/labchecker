@@ -115,7 +115,8 @@ class ProblemResult:
     review_reasons: List[str] = field(default_factory=list)
     is_pending: bool = False
     check_items: List[CheckItem] = field(default_factory=list)
-
+    candidate_evaluations: List[Dict[str, Any]] = field(default_factory=list)
+    chosen_candidate: Optional[Dict[str, Any]] = None
 
 
 @dataclass

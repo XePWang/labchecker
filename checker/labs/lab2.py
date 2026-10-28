@@ -348,6 +348,7 @@ class Lab2Judge(BaseLabJudge):
 
             cand_score = round(2.0 * (passed_cases / total_cases), 2)
             cand_evaluations.append({
+                "cand_idx": cand_idx,
                 "src_path": cand_src,
                 "score": cand_score,
                 "passed_cases": passed_cases,
@@ -362,7 +363,7 @@ class Lab2Judge(BaseLabJudge):
 
         best_eval = max(
             cand_evaluations,
-            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0)
+            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0, -x["cand_idx"])
         )
         src_path = best_eval["src_path"]
         c_res = best_eval["c_res"]
@@ -375,6 +376,29 @@ class Lab2Judge(BaseLabJudge):
             prob.review_reasons.extend(best_eval["reviews"])
         if best_eval["is_pending"]:
             prob.is_pending = True
+
+        prob.candidate_evaluations = [
+            {
+                "index": c["cand_idx"],
+                "src_path": str(c["src_path"]),
+                "filename": c["src_path"].name,
+                "score": c["score"],
+                "passed_cases": c["passed_cases"],
+                "compile_success": c["success"],
+                "needs_review": c["needs_review"],
+                "notes": c["notes"],
+                "reviews": c["reviews"],
+            }
+            for c in cand_evaluations
+        ]
+        prob.chosen_candidate = {
+            "index": best_eval["cand_idx"],
+            "src_path": str(best_eval["src_path"]),
+            "filename": best_eval["src_path"].name,
+            "score": best_eval["score"],
+            "passed_cases": best_eval["passed_cases"],
+            "reason": f"最高分版本 ({prob.score:.2f}/2.00, 通过率 {passed_cases}/{total_cases})",
+        }
 
         best_sf = next((f for f in (all_files or []) if f.path == src_path), None)
         is_enc_err = bool(best_sf and best_sf.encoding_error)
@@ -725,6 +749,7 @@ class Lab2Judge(BaseLabJudge):
 
             cand_score = round(3.0 * (passed_cases / total_cases), 2)
             cand_evaluations.append({
+                "cand_idx": cand_idx,
                 "src_path": cand_src,
                 "score": cand_score,
                 "passed_cases": passed_cases,
@@ -739,7 +764,7 @@ class Lab2Judge(BaseLabJudge):
 
         best_eval = max(
             cand_evaluations,
-            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0)
+            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0, -x["cand_idx"])
         )
         src_path = best_eval["src_path"]
         c_res = best_eval["c_res"]
@@ -752,6 +777,29 @@ class Lab2Judge(BaseLabJudge):
             prob.review_reasons.extend(best_eval.get("reviews", []))
         if best_eval.get("is_pending"):
             prob.is_pending = True
+
+        prob.candidate_evaluations = [
+            {
+                "index": c["cand_idx"],
+                "src_path": str(c["src_path"]),
+                "filename": c["src_path"].name,
+                "score": c["score"],
+                "passed_cases": c["passed_cases"],
+                "compile_success": c["success"],
+                "needs_review": c["needs_review"],
+                "notes": c["notes"],
+                "reviews": c["reviews"],
+            }
+            for c in cand_evaluations
+        ]
+        prob.chosen_candidate = {
+            "index": best_eval["cand_idx"],
+            "src_path": str(best_eval["src_path"]),
+            "filename": best_eval["src_path"].name,
+            "score": best_eval["score"],
+            "passed_cases": best_eval["passed_cases"],
+            "reason": f"最高分版本 ({prob.score:.2f}/3.00, 通过率 {passed_cases}/{total_cases})",
+        }
 
         best_sf = next((f for f in (all_files or []) if f.path == src_path), None)
         is_enc_err = bool(best_sf and best_sf.encoding_error)

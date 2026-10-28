@@ -2161,5 +2161,275 @@ int main() {
         file2 = staged2[std.student_id][0]
         self.assertIn("updated", file2.path.read_text(encoding="utf-8"), "容器更新后应解压最新内容并更新归档")
 
+    def test_51_lab1_2_full_score_candidate_selection(self):
+        """测试51: Lab1-2候选选择使用“代码+手写验算”整题最终最高分，不受输入顺序影响"""
+        lab_dir = self.test_work / "test_51_lab"
+        build_dir = lab_dir / "build"
+        src_dir = lab_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = Student(seq=1, student_id="2026110214", name="测试满分生", class_id="260101", phone="17393861988")
+
+        # 候选 A: 逻辑正确，但硬编码 y=20 与推导 y=88 不符 (总分 2.8)
+        code_a = """#include <stdio.h>
+int main() {
+    short x = 14, y = 20;
+    printf("%5hd%5hd%5hd\\n", !x, x||y, x&&y);
+    printf("%5hu%5hd%5hd\\n", (unsigned short)~x, (short)(x|y), (short)(x&y));
+    printf("%5hd%5hd%5hd\\n", (short)~x, (short)(x|y), (short)(x&y));
+    return 0;
+}
+"""
+        # 候选 B: 逻辑正确，且参数完全匹配 y=88 (满分 3.0)
+        code_b = """#include <stdio.h>
+int main() {
+    short x = 14, y = 88;
+    printf("%5hd%5hd%5hd\\n", !x, x||y, x&&y);
+    printf("%5hu%5hd%5hd\\n", (unsigned short)~x, (short)(x|y), (short)(x&y));
+    printf("%5hd%5hd%5hd\\n", (short)~x, (short)(x|y), (short)(x&y));
+    return 0;
+}
+"""
+        file_a = src_dir / f"{std.student_id}_Lab1-2_A.c"
+        file_a.write_text(code_a, encoding="utf-8")
+        sf_a = SubmissionFile(path=file_a, original_name=file_a.name, file_type="c_source", matched_problem="1-2")
+
+        file_b = src_dir / f"{std.student_id}_Lab1-2_B.c"
+        file_b.write_text(code_b, encoding="utf-8")
+        sf_b = SubmissionFile(path=file_b, original_name=file_b.name, file_type="c_source", matched_problem="1-2")
+
+        hw_file = src_dir / f"{std.student_id}_hw.jpg"
+        hw_file.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        sf_hw = SubmissionFile(path=hw_file, original_name=hw_file.name, file_type="image", matched_problem="1-2")
+
+        judge = Lab1Judge()
+        std_build = build_dir / std.student_id
+
+        # 顺序 1: [sf_a, sf_b]
+        res1 = judge._grade_lab1_2(std, [sf_a.path, sf_b.path], [sf_hw.path], std_build, mock_ai=True, all_student_files=[sf_a, sf_b, sf_hw])
+        self.assertAlmostEqual(res1.score, 3.0, places=2)
+        self.assertEqual(res1.chosen_candidate["src_path"], str(sf_b.path))
+
+        # 顺序 2: [sf_b, sf_a]
+        res2 = judge._grade_lab1_2(std, [sf_b.path, sf_a.path], [sf_hw.path], std_build, mock_ai=True, all_student_files=[sf_b, sf_a, sf_hw])
+        self.assertAlmostEqual(res2.score, 3.0, places=2)
+        self.assertEqual(res2.chosen_candidate["src_path"], str(sf_b.path))
+
+    def test_52_compile_error_candidate_isolation(self):
+        """测试52: 多候选存在编译错误版本时，不污染成功版本的评测与得分"""
+        lab_dir = self.test_work / "test_52_lab"
+        build_dir = lab_dir / "build"
+        src_dir = lab_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        bad_code = "syntax error; this is not C;\n"
+        file_bad = src_dir / f"{std.student_id}_Lab2-1_bad.c"
+        file_bad.write_text(bad_code, encoding="utf-8")
+        sf_bad = SubmissionFile(path=file_bad, original_name=file_bad.name, file_type="c_source", matched_problem="2-1")
+
+        good_code = """#include <stdio.h>
+int main() {
+    int h;
+    if (scanf("%d", &h) != 1) { printf("Invalid input!\\n"); return 0; }
+    if (h >= 0 && h < 12) printf("Good morning!\\n");
+    else if (h == 12) printf("Good noon!\\n");
+    else if (h >= 13 && h < 18) printf("Good afternoon!\\n");
+    else if (h >= 18 && h < 21) printf("Good evening!\\n");
+    else if (h >= 21 && h < 24) printf("Good night!\\n");
+    else printf("Invalid input!\\n");
+    return 0;
+}
+"""
+        file_good = src_dir / f"{std.student_id}_Lab2-1_good.c"
+        file_good.write_text(good_code, encoding="utf-8")
+        sf_good = SubmissionFile(path=file_good, original_name=file_good.name, file_type="c_source", matched_problem="2-1")
+
+        judge = Lab2Judge()
+        std_build = build_dir / std.student_id
+        std_build.mkdir(parents=True, exist_ok=True)
+
+        grade = judge.grade_student(std, [sf_bad, sf_good], std_build, mock_ai=True)
+        prob21 = grade.problem_results["2-1"]
+
+        self.assertAlmostEqual(prob21.score, 2.0, places=2)
+        self.assertEqual(prob21.status, "passed")
+        self.assertFalse(grade.needs_review, "编译错误的不良候选不应将学生置为待复核")
+        self.assertEqual(len(prob21.candidate_evaluations), 2)
+        self.assertEqual(prob21.chosen_candidate["src_path"], str(sf_good.path))
+
+    def test_53_complementary_candidates_no_cross_merging(self):
+        """测试53: 多候选互补通过不同用例时，只能选择其中一个独立版本，不能交叉合并得分"""
+        lab_dir = self.test_work / "test_53_lab"
+        build_dir = lab_dir / "build"
+        src_dir = lab_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        # 候选 1: 只处理 morning (0..11)
+        code_m = """#include <stdio.h>
+int main() {
+    int h;
+    if (scanf("%d", &h) == 1 && h >= 0 && h < 12) printf("Good morning!\\n");
+    else printf("Invalid input!\\n");
+    return 0;
+}
+"""
+        # 候选 2: 只处理 evening (18..20)
+        code_e = """#include <stdio.h>
+int main() {
+    int h;
+    if (scanf("%d", &h) == 1 && h >= 18 && h < 21) printf("Good evening!\\n");
+    else printf("Invalid input!\\n");
+    return 0;
+}
+"""
+        f_m = src_dir / f"{std.student_id}_Lab2-1_m.c"
+        f_m.write_text(code_m, encoding="utf-8")
+        sf_m = SubmissionFile(path=f_m, original_name=f_m.name, file_type="c_source", matched_problem="2-1")
+
+        f_e = src_dir / f"{std.student_id}_Lab2-1_e.c"
+        f_e.write_text(code_e, encoding="utf-8")
+        sf_e = SubmissionFile(path=f_e, original_name=f_e.name, file_type="c_source", matched_problem="2-1")
+
+        judge = Lab2Judge()
+        std_build = build_dir / std.student_id
+        std_build.mkdir(parents=True, exist_ok=True)
+
+        res = judge._grade_lab2_1(std, [sf_m.path, sf_e.path], std_build, mock_ai=True, all_files=[sf_m, sf_e])
+        # 单独候选只通过各自部分用例，严禁跨版本合并用例得分
+        self.assertLess(res.score, 2.0)
+        self.assertGreater(res.score, 0.0)
+        self.assertIn(res.chosen_candidate["src_path"], [str(sf_m.path), str(sf_e.path)])
+
+    def test_54_serial_vs_parallel_compilation_consistency(self):
+        """测试54: 并行编译与串行编译得到一致的候选集和最高分选择结果"""
+        from checker.compiler import CompileTask
+        lab_dir = self.test_work / "test_54_lab"
+        src_dir = lab_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        files = []
+        for i in range(4):
+            f = src_dir / f"{std.student_id}_cand_{i}.c"
+            f.write_text(f'#include <stdio.h>\nint main() {{ printf("cand {i}\\n"); return 0; }}', encoding="utf-8")
+            files.append(f)
+
+        compiler = ProjectCompiler()
+
+        build_serial = lab_dir / "build_serial" / std.student_id
+        build_serial.mkdir(parents=True, exist_ok=True)
+        tasks_serial = [
+            CompileTask(
+                student_id=std.student_id,
+                problem_id="lab2_1",
+                cand_idx=i,
+                src_path=files[i],
+                build_dir=build_serial,
+                binary_name=f"cand_{i}",
+            )
+            for i in range(4)
+        ]
+        res_serial = compiler.compile_batch(tasks_serial, max_workers=1)
+
+        build_parallel = lab_dir / "build_parallel" / std.student_id
+        build_parallel.mkdir(parents=True, exist_ok=True)
+        tasks_parallel = [
+            CompileTask(
+                student_id=std.student_id,
+                problem_id="lab2_1",
+                cand_idx=i,
+                src_path=files[i],
+                build_dir=build_parallel,
+                binary_name=f"cand_{i}",
+            )
+            for i in range(4)
+        ]
+        res_parallel = compiler.compile_batch(tasks_parallel, max_workers=4)
+
+        self.assertEqual(len(res_serial), 4)
+        self.assertEqual(len(res_parallel), 4)
+        for i in range(4):
+            key = (std.student_id, "lab2_1", i)
+            self.assertTrue(res_serial[key].success)
+            self.assertTrue(res_parallel[key].success)
+            self.assertTrue(res_serial[key].binary_path.exists())
+            self.assertTrue(res_parallel[key].binary_path.exists())
+
+    def test_55_lab1_and_lab2_common_multiversion_workflow(self):
+        """测试55: Lab1和Lab2均能使用这套公共流程正确评测多候选提交"""
+        lab_dir = self.test_work / "test_55_lab"
+        src_dir = lab_dir / "src"
+        build_dir = lab_dir / "build"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+        std_build = build_dir / std.student_id
+        std_build.mkdir(parents=True, exist_ok=True)
+
+        code_bad_1_3 = '#include <stdio.h>\nint main(){ printf("wrong\\n"); return 0; }\n'
+        code_good_1_3 = """#include <stdio.h>
+int main() {
+    int mode;
+    double temp;
+    if (scanf("%d %lf", &mode, &temp) != 2) return 0;
+    if (mode == 0) printf("%.2f\\n", (temp - 32.0) * 5.0 / 9.0);
+    else printf("%.2f\\n", temp * 9.0 / 5.0 + 32.0);
+    return 0;
+}
+"""
+        f_b_13 = src_dir / f"{std.student_id}_1_3_bad.c"
+        f_b_13.write_text(code_bad_1_3, encoding="utf-8")
+        sf_b_13 = SubmissionFile(path=f_b_13, original_name=f_b_13.name, file_type="c_source", matched_problem="1-3")
+
+        f_g_13 = src_dir / f"{std.student_id}_1_3_good.c"
+        f_g_13.write_text(code_good_1_3, encoding="utf-8")
+        sf_g_13 = SubmissionFile(path=f_g_13, original_name=f_g_13.name, file_type="c_source", matched_problem="1-3")
+
+        judge1 = Lab1Judge()
+        res_1_3 = judge1._grade_lab1_3(std, [sf_b_13.path, sf_g_13.path], std_build, mock_ai=True, all_student_files=[sf_b_13, sf_g_13])
+        self.assertAlmostEqual(res_1_3.score, 2.0, places=2)
+        self.assertEqual(len(res_1_3.candidate_evaluations), 2)
+        self.assertEqual(res_1_3.chosen_candidate["src_path"], str(sf_g_13.path))
+
+        code_bad_2_2 = '#include <stdio.h>\nint main(){ printf("A\\n"); return 0; }\n'
+        code_good_2_2 = """#include <stdio.h>
+#include <ctype.h>
+int main() {
+    char ch;
+    if (scanf(" %c", &ch) != 1 || !isalpha(ch)) { printf("ERROR\\n"); return 0; }
+    ch = toupper(ch);
+    int n = ch - 'A' + 1;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n - i - 1; j++) printf(" ");
+        for (char c = 'A'; c <= 'A' + i; c++) printf("%c", c);
+        for (char c = 'A' + i - 1; c >= 'A'; c--) printf("%c", c);
+        printf("\\n");
+    }
+    return 0;
+}
+"""
+        f_b_22 = src_dir / f"{std.student_id}_2_2_bad.c"
+        f_b_22.write_text(code_bad_2_2, encoding="utf-8")
+        sf_b_22 = SubmissionFile(path=f_b_22, original_name=f_b_22.name, file_type="c_source", matched_problem="2-2")
+
+        f_g_22 = src_dir / f"{std.student_id}_2_2_good.c"
+        f_g_22.write_text(code_good_2_2, encoding="utf-8")
+        sf_g_22 = SubmissionFile(path=f_g_22, original_name=f_g_22.name, file_type="c_source", matched_problem="2-2")
+
+        judge2 = Lab2Judge()
+        res_2_2 = judge2._grade_lab2_2(std, [sf_b_22.path, sf_g_22.path], std_build, mock_ai=True, all_files=[sf_b_22, sf_g_22])
+        self.assertAlmostEqual(res_2_2.score, 3.0, places=2)
+        self.assertEqual(len(res_2_2.candidate_evaluations), 2)
+        self.assertEqual(res_2_2.chosen_candidate["src_path"], str(sf_g_22.path))
+
 if __name__ == "__main__":
     unittest.main()
