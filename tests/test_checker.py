@@ -1966,6 +1966,41 @@ int main() {
                 self.roster_mgr.students.remove(std_c)
             self.roster_mgr.by_id.pop(std_c.student_id, None)
 
+    def test_48_nested_archive_slug_isolation(self):
+        """测试48: 同名嵌套ZIP使用来源相对路径作为前缀，互不覆盖"""
+        lab_dir = self.test_work / "test_48_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        code_a = '#include <stdio.h>\nint main() { printf("nested A\\n"); return 0; }\n'
+        code_b = '#include <stdio.h>\nint main() { printf("nested B\\n"); return 0; }\n'
+
+        nested_a_bytes = io.BytesIO()
+        with zipfile.ZipFile(nested_a_bytes, "w") as zf:
+            zf.writestr("Lab1-3.c", code_a)
+
+        nested_b_bytes = io.BytesIO()
+        with zipfile.ZipFile(nested_b_bytes, "w") as zf:
+            zf.writestr("Lab1-3.c", code_b)
+
+        outer_zip = submit_dir / f"{std.student_id}_outer.zip"
+        with zipfile.ZipFile(outer_zip, "w") as zf:
+            zf.writestr("dir_a/version.zip", nested_a_bytes.getvalue())
+            zf.writestr("dir_b/version.zip", nested_b_bytes.getvalue())
+
+        normalizer = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged = normalizer.process_all_submissions()
+
+        std_files = staged.get(std.student_id, [])
+        c_files = [f for f in std_files if f.file_type == "c_source"]
+        self.assertEqual(len(c_files), 2, "嵌套同名zip解压时不应相互覆盖，应全部归档")
+
+        texts = {f.path.read_text(encoding="utf-8") for f in c_files}
+        self.assertIn(code_a, texts)
+        self.assertIn(code_b, texts)
+
     def test_49_zip_duplicate_member_disambiguation(self):
         """测试49: 单个ZIP内的同名文件解压时消歧并全部归档"""
         lab_dir = self.test_work / "test_49_lab"

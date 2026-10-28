@@ -267,7 +267,18 @@ class SafeExtractor:
                     final_files: List[Path] = []
                     for f in extracted_files:
                         if f.is_file() and f.suffix.lower() in KNOWN_ARCHIVE_EXTS:
-                            nested_dest = dest_dir / f"nested_{f.stem}"
+                            try:
+                                rel_parent = f.relative_to(dest_dir).parent
+                            except Exception:
+                                rel_parent = Path(".")
+                            slug_parts = [p for p in rel_parent.parts if p and p != "."]
+                            slug = "_".join(slug_parts)
+                            base_nested_name = f"nested_{slug}_{f.stem}" if slug else f"nested_{f.stem}"
+                            nested_dest = dest_dir / base_nested_name
+                            v_idx = 2
+                            while nested_dest.exists() and any(p for p in nested_dest.iterdir() if p.name not in IGNORED_PATTERNS):
+                                nested_dest = dest_dir / f"{base_nested_name}_{v_idx}"
+                                v_idx += 1
                             nested_dest.mkdir(parents=True, exist_ok=True)
                             ok, msg, sub_files = self.extract_archive(
                                 archive_path=f,
@@ -338,6 +349,41 @@ class SafeExtractor:
                             out_path.parent.mkdir(parents=True, exist_ok=True)
                             out_path.write_bytes(member_bytes)
                             extracted_files.append(out_path)
+
+                # 嵌套压缩包递归展开 (Tar)
+                if recursive and depth < max_depth:
+                    final_files = []
+                    for f in extracted_files:
+                        if f.is_file() and f.suffix.lower() in KNOWN_ARCHIVE_EXTS:
+                            try:
+                                rel_parent = f.relative_to(dest_dir).parent
+                            except Exception:
+                                rel_parent = Path(".")
+                            slug_parts = [p for p in rel_parent.parts if p and p != "."]
+                            slug = "_".join(slug_parts)
+                            base_nested_name = f"nested_{slug}_{f.stem}" if slug else f"nested_{f.stem}"
+                            nested_dest = dest_dir / base_nested_name
+                            v_idx = 2
+                            while nested_dest.exists() and any(p for p in nested_dest.iterdir() if p.name not in IGNORED_PATTERNS):
+                                nested_dest = dest_dir / f"{base_nested_name}_{v_idx}"
+                                v_idx += 1
+                            nested_dest.mkdir(parents=True, exist_ok=True)
+                            ok, msg, sub_files = self.extract_archive(
+                                archive_path=f,
+                                dest_dir=nested_dest,
+                                max_total_bytes=max_total_bytes,
+                                max_files_count=max_files_count,
+                                recursive=True,
+                                depth=depth + 1,
+                                max_depth=max_depth,
+                            )
+                            if ok:
+                                final_files.extend(sub_files)
+                            else:
+                                final_files.append(f)
+                        else:
+                            final_files.append(f)
+                    extracted_files = final_files
 
                 return True, "Tar 解压成功", extracted_files
             except Exception as e:
