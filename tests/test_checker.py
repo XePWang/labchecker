@@ -1966,5 +1966,35 @@ int main() {
                 self.roster_mgr.students.remove(std_c)
             self.roster_mgr.by_id.pop(std_c.student_id, None)
 
+    def test_49_zip_duplicate_member_disambiguation(self):
+        """测试49: 单个ZIP内的同名文件解压时消歧并全部归档"""
+        lab_dir = self.test_work / "test_49_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        code_1 = '#include <stdio.h>\nint main() { printf("dup 1\\n"); return 0; }\n'
+        code_2 = '#include <stdio.h>\nint main() { printf("dup 2\\n"); return 0; }\n'
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_1)
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_2)
+
+        zip_path = submit_dir / f"{std.student_id}_dup.zip"
+        zip_path.write_bytes(buf.getvalue())
+
+        normalizer = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged = normalizer.process_all_submissions()
+
+        std_files = staged.get(std.student_id, [])
+        c_files = [f for f in std_files if f.file_type == "c_source"]
+        self.assertEqual(len(c_files), 2, "单个zip内同名条目必须通过消歧全部归档")
+
+        texts = {f.path.read_text(encoding="utf-8") for f in c_files}
+        self.assertIn(code_1, texts)
+        self.assertIn(code_2, texts)
+
 if __name__ == "__main__":
     unittest.main()

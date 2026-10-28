@@ -240,9 +240,26 @@ class SafeExtractor:
                         if len(extracted_files) >= max_files_count:
                             return False, "解压文件数量过多 (> 300)，中止解压", []
 
+                        member_bytes = zf.read(info)
+                        if out_path.exists():
+                            if out_path.read_bytes() == member_bytes:
+                                # 内容完全相同的重复条目，直接跳过
+                                continue
+                            v_idx = 2
+                            while True:
+                                cand_path = out_path.parent / f"{out_path.stem}_v{v_idx:03d}{out_path.suffix}"
+                                if not cand_path.exists():
+                                    out_path = cand_path
+                                    break
+                                elif cand_path.read_bytes() == member_bytes:
+                                    out_path = None
+                                    break
+                                v_idx += 1
+                            if out_path is None:
+                                continue
+
                         out_path.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(info) as src, open(out_path, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+                        out_path.write_bytes(member_bytes)
                         extracted_files.append(out_path)
 
                 # 嵌套压缩包递归展开 (处理学生在 zip 内嵌套提交了子 zip 的情况)
@@ -296,11 +313,30 @@ class SafeExtractor:
                         if total_extracted_bytes > max_total_bytes:
                             return False, "Tar 解压体积超限", []
 
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        if len(extracted_files) >= max_files_count:
+                            return False, "Tar 解压文件数量超限", []
+
                         f = tf.extractfile(member)
                         if f:
-                            with open(out_path, "wb") as dst:
-                                shutil.copyfileobj(f, dst)
+                            member_bytes = f.read()
+                            if out_path.exists():
+                                if out_path.read_bytes() == member_bytes:
+                                    continue
+                                v_idx = 2
+                                while True:
+                                    cand_path = out_path.parent / f"{out_path.stem}_v{v_idx:03d}{out_path.suffix}"
+                                    if not cand_path.exists():
+                                        out_path = cand_path
+                                        break
+                                    elif cand_path.read_bytes() == member_bytes:
+                                        out_path = None
+                                        break
+                                    v_idx += 1
+                                if out_path is None:
+                                    continue
+
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.write_bytes(member_bytes)
                             extracted_files.append(out_path)
 
                 return True, "Tar 解压成功", extracted_files
