@@ -25,13 +25,19 @@ class SubmissionFile:
     """提取或解压后的文件记录"""
     path: Path
     original_name: str
-    file_type: str  # c_source, cpp_source, image, archive, document, corrupt_archive, other
+    file_type: str  # c_source, cpp_source, header, image, archive, document, corrupt_archive, other
     matched_problem: Optional[str] = None  # 1-2, 1-3, 2-1, 2-2, 2-3, 2-4, warmup
     is_warmup: bool = False
     note: str = ""
     source_encoding: str = "utf-8"
     encoding_converted: bool = False
     encoding_error: str = ""
+    version_id: str = "v001"
+    origin_path: str = ""
+    nested_archive_path: str = ""
+    archive_rel_path: str = ""
+    is_dependency: bool = False
+    dependency_files: List[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -109,6 +115,7 @@ class ProblemResult:
     review_reasons: List[str] = field(default_factory=list)
     is_pending: bool = False
     check_items: List[CheckItem] = field(default_factory=list)
+
 
 
 @dataclass

@@ -511,13 +511,16 @@ class SubmissionNormalizer:
         if not self.submit_dir.exists():
             return []
 
+        # 实验1批次严格排除补交包 TS602_殷裕鑫_2026112444_实验1.zip.zip，保留原文件不修改不解压
+        excluded_names = {"TS602_殷裕鑫_2026112444_实验1.zip.zip"} if self.lab_name == "lab1" else set()
+
         entries = sorted(list(self.submit_dir.iterdir()))
         items: List[Path] = []
         handled_container_stems: Set[str] = set()
 
         def collect_from_dir(d: Path):
             for sub_item in sorted(list(d.iterdir())):
-                if sub_item.name.startswith(".") or sub_item.name in IGNORED_PATTERNS:
+                if sub_item.name.startswith(".") or sub_item.name in IGNORED_PATTERNS or sub_item.name in excluded_names:
                     continue
                 if sub_item.is_dir() and self._is_container_dir(sub_item):
                     collect_from_dir(sub_item)
@@ -528,7 +531,7 @@ class SubmissionNormalizer:
         container_dirs = []
         regular_entries = []
         for e in entries:
-            if e.name.startswith(".") or e.name in IGNORED_PATTERNS:
+            if e.name.startswith(".") or e.name in IGNORED_PATTERNS or e.name in excluded_names:
                 continue
             if e.is_dir() and self._is_container_dir(e):
                 container_dirs.append(e)
@@ -548,12 +551,23 @@ class SubmissionNormalizer:
                 if clean_stem not in handled_container_stems:
                     container_dest = WORK_DIR / f"{self.lab_name}_container" / e.stem
                     container_dest.mkdir(parents=True, exist_ok=True)
-                    existing = [p for p in container_dest.iterdir() if p.name not in IGNORED_PATTERNS]
+                    sig_file = container_dest / ".container_sig"
+                    curr_sig = f"{e.stat().st_size}_{e.stat().st_mtime_ns}"
+                    existing = [p for p in container_dest.iterdir() if p.name not in IGNORED_PATTERNS and p.name != ".container_sig"]
+                    need_extract = False
                     if not existing:
+                        need_extract = True
+                    elif not sig_file.exists() or sig_file.read_text(encoding="utf-8").strip() != curr_sig:
+                        shutil.rmtree(container_dest, ignore_errors=True)
+                        container_dest.mkdir(parents=True, exist_ok=True)
+                        need_extract = True
+
+                    if need_extract:
                         ok, msg, files = self.extractor.extract_container(e, container_dest)
                         if not ok:
                             self.unmatched_items.append({"path": str(e), "reason": f"总包容器解压失败: {msg}"})
                             continue
+                        sig_file.write_text(curr_sig, encoding="utf-8")
                     collect_from_dir(container_dest)
                     handled_container_stems.add(clean_stem)
             else:
@@ -620,7 +634,7 @@ class SubmissionNormalizer:
             if not student:
                 continue
 
-            for entry in entry_list:
+            for entry in sorted(entry_list, key=lambda p: str(p)):
                 extracted_items: List[Path] = []
                 root_dir: Optional[Path] = None
 
@@ -675,21 +689,57 @@ class SubmissionNormalizer:
                     root_dir = entry.parent
 
                 # 若解压包内只有一个顶层包裹文件夹，去除该单层包裹以获得真实代码根目录
+                # 但若该文件夹本身即为题目工程目录（如 Lab1-3, 1-2），必须保留为工程隔离目录
                 effective_root = root_dir
                 if root_dir and root_dir.exists():
-                    top_items = [p for p in root_dir.iterdir() if p.name not in IGNORED_PATTERNS]
+                    top_items = [p for p in root_dir.iterdir() if p.name not in IGNORED_PATTERNS and p.name != ".unpack_sig"]
                     if len(top_items) == 1 and top_items[0].is_dir():
-                        effective_root = top_items[0]
+                        top_name = top_items[0].name
+                        is_prob_dir = bool(
+                            self._match_problem(top_name, "c_source") or
+                            re.search(r"lab\s*\d|1[-_.]?[23]|2[-_.]?[1234]|温度|逻辑|金字塔|问候", top_name, re.I)
+                        )
+                        if not is_prob_dir:
+                            effective_root = top_items[0]
 
-                for file_path in extracted_items:
-                    if any(ign in file_path.name for ign in IGNORED_PATTERNS):
-                        continue
+                valid_extracted = [
+                    f for f in extracted_items
+                    if not any(ign in f.name for ign in IGNORED_PATTERNS) and f.name != ".unpack_sig" and f.is_file()
+                ]
 
-                    rel_path = file_path.name
+                dir_groups: Dict[str, List[Tuple[Path, Path]]] = {}
+                loose_files: List[Tuple[Path, str]] = []
+
+                has_root_headers = any(
+                    f.suffix.lower() in {".h", ".hpp"} and
+                    len((f.relative_to(effective_root) if (effective_root and f.is_relative_to(effective_root)) else Path(f.name)).parts) == 1
+                    for f in valid_extracted
+                )
+
+                for file_path in valid_extracted:
                     if effective_root and file_path.is_relative_to(effective_root):
-                        rel_path = str(file_path.relative_to(effective_root))
+                        rel_p = file_path.relative_to(effective_root)
+                    else:
+                        rel_p = Path(file_path.name)
 
-                    sub_file = self._classify_and_stage_file(student, file_path, rel_path)
+                    if len(rel_p.parts) > 1:
+                        top_group = rel_p.parts[0]
+                        sub_path = Path(*rel_p.parts[1:])
+                        dir_groups.setdefault(top_group, []).append((file_path, sub_path))
+                    elif has_root_headers and file_path.suffix.lower() in (ALLOWED_SOURCE_EXTS | {".h", ".hpp"}):
+                        dir_groups.setdefault(entry.stem, []).append((file_path, Path(file_path.name)))
+                    else:
+                        loose_files.append((file_path, str(rel_p)))
+
+                # 1. 优先以目录为单位隔离归档多文件/头文件依赖程序
+                for grp_name, grp_files in dir_groups.items():
+                    staged_sub_files = self._stage_directory_group(student, grp_name, grp_files, origin_entry=entry)
+                    for sf in staged_sub_files:
+                        self.student_files.setdefault(student.student_id, []).append(sf)
+
+                # 2. 归档单文件/散放文件
+                for file_path, rel_str in loose_files:
+                    sub_file = self._classify_and_stage_file(student, file_path, rel_str, origin_entry=entry)
                     if sub_file:
                         self.student_files.setdefault(student.student_id, []).append(sub_file)
 
@@ -845,17 +895,235 @@ class SubmissionNormalizer:
             "archived_files": archived_files,
         }
 
+    def _match_problem(self, search_target: str, ftype: str, content_for_matching: str = "") -> Optional[str]:
+        """统一识别文件或目录归属的题号"""
+        search_target = search_target.lower()
+        is_warmup = bool(re.search(r"warm\s*up|热身", search_target))
+
+        if self.lab_name == "lab1":
+            is_p13 = bool(re.search(r"lab\s*1\s*[-_.]?\s*3(?!\d)|(?<!\d)1\s*[-_.]\s*3(?!\d)|(?<!\d)13(?!\d)|温度", search_target))
+            is_p12 = bool(re.search(r"lab\s*1\s*[-_.]?\s*2(?!\d)|(?<!\d)1\s*[-_.]\s*2(?!\d)|(?<!\d)12(?!\d)|逻辑|验算|草稿|演草", search_target))
+            if is_p13 and not is_p12:
+                return "1-3"
+            elif is_p12 and not is_p13:
+                return "1-2"
+            elif is_p13 and is_p12:
+                if "1-3" in search_target or "1_3" in search_target or "1.3" in search_target:
+                    return "1-3"
+                else:
+                    return "1-2"
+            elif ftype == "image":
+                return "1-2"
+            elif ftype in ("c_source", "cpp_source", "header"):
+                if content_for_matching:
+                    if any(op in content_for_matching for op in ["!x", "x||y", "x&&y", "~x", "x|y", "x&y"]):
+                        return "1-2"
+                    elif any(kw in content_for_matching.lower() for kw in ["32", "celsius", "fahrenheit", "centigrade", "华氏", "摄氏"]):
+                        return "1-3"
+            return None
+        elif self.lab_name == "lab2":
+            if is_warmup:
+                return "warmup"
+            elif re.search(r"lab\s*2\s*[-_.]?\s*1(?!\d)|(?<!\d)2\s*[-_.]\s*1(?!\d)|(?<!\d)21(?!\d)|问候", search_target):
+                return "2-1"
+            elif re.search(r"lab\s*2\s*[-_.]?\s*2(?!\d)|(?<!\d)2\s*[-_.]\s*2(?!\d)|(?<!\d)22(?!\d)|金字塔", search_target):
+                return "2-2"
+            elif re.search(r"lab\s*2\s*[-_.]?\s*3(?!\d)|(?<!\d)2\s*[-_.]\s*3(?!\d)|(?<!\d)23(?!\d)|回文", search_target):
+                return "2-3"
+            elif re.search(r"lab\s*2\s*[-_.]?\s*4(?!\d)|(?<!\d)2\s*[-_.]\s*4(?!\d)|(?<!\d)24(?!\d)|编码器", search_target):
+                return "2-4"
+            return None
+        return None
+
+    def _stage_directory_group(
+        self,
+        student: Student,
+        group_name: str,
+        group_files: List[Tuple[Path, Path]],
+        origin_entry: Path,
+    ) -> List[SubmissionFile]:
+        """
+        按完整目录隔离多文件、头文件或依赖程序（如 Lab1-3/main.c 与 Lab1-3/inc/config.h）。
+        若目录内容完全相同则去重复用；若内容或依赖不同，生成新版本目录（如 Lab1-3_v002）。
+        """
+        target_student_dir = self.src_dir / student.student_id
+        target_student_dir.mkdir(parents=True, exist_ok=True)
+
+        prepared = []
+        for raw_file, rel_sub in group_files:
+            ext = raw_file.suffix.lower()
+            is_source = ext in ALLOWED_SOURCE_EXTS
+            if ext in {".h", ".hpp"}:
+                ftype = "header"
+            elif ext == ".c":
+                ftype = "c_source"
+            elif is_source:
+                ftype = "cpp_source"
+            elif ext in ALLOWED_IMAGE_EXTS:
+                ftype = "image"
+            elif ext in ALLOWED_DOC_EXTS:
+                ftype = "document"
+            elif ext in ALLOWED_PROJECT_EXTS:
+                ftype = "project"
+            elif ext in ALLOWED_LINK_EXTS:
+                ftype = "link"
+            elif ext in {".exe", ".bin", ".out"}:
+                ftype = "executable"
+            else:
+                ftype = "other"
+
+            source_encoding = "binary"
+            encoding_converted = False
+            encoding_error = ""
+            content_for_matching = ""
+            raw_bytes = raw_file.read_bytes()
+
+            if is_source:
+                ok, enc, text, conv, err = detect_and_decode_source(raw_bytes)
+                source_encoding = enc
+                encoding_converted = conv
+                if ok:
+                    final_bytes = text.encode("utf-8")
+                    content_for_matching = text
+                    if conv:
+                        self.converted_encoding_count += 1
+                else:
+                    final_bytes = raw_bytes
+                    encoding_error = err or "未知或损坏编码"
+                    self.unknown_encoding_files.append({
+                        "path": str(raw_file),
+                        "student_id": student.student_id,
+                        "error": encoding_error,
+                    })
+            else:
+                final_bytes = raw_bytes
+
+            search_target = f"{group_name} {rel_sub} {raw_file.name}".lower()
+            is_warmup = bool(re.search(r"warm\s*up|热身", search_target))
+            matched_problem = self._match_problem(search_target, ftype, content_for_matching)
+            if not matched_problem:
+                matched_problem = self._match_problem(group_name, ftype, content_for_matching)
+
+            prepared.append({
+                "raw_file": raw_file,
+                "rel_sub": rel_sub,
+                "final_bytes": final_bytes,
+                "is_source": is_source,
+                "ftype": ftype,
+                "matched_problem": matched_problem,
+                "is_warmup": is_warmup,
+                "source_encoding": source_encoding,
+                "encoding_converted": encoding_converted,
+                "encoding_error": encoding_error,
+            })
+
+        # 寻找匹配版本或空闲版本目录
+        version_idx = 1
+        matched_cand_dir: Optional[Path] = None
+        is_exact_duplicate = False
+
+        while True:
+            cand_name = group_name if version_idx == 1 else f"{group_name}_v{version_idx:03d}"
+            cand_dir = target_student_dir / cand_name
+            if not cand_dir.exists():
+                matched_cand_dir = cand_dir
+                break
+
+            # 比较 cand_dir 中的所有文件与 incoming 是否完全一致
+            cand_matches = True
+            for item in prepared:
+                dest_file = cand_dir / item["rel_sub"]
+                if not dest_file.exists():
+                    cand_matches = False
+                    break
+                if dest_file.read_bytes() != item["final_bytes"]:
+                    cand_matches = False
+                    break
+
+            if cand_matches:
+                existing_disk_files = {
+                    p.relative_to(cand_dir)
+                    for p in cand_dir.rglob("*")
+                    if p.is_file() and not any(ign in p.name for ign in IGNORED_PATTERNS)
+                }
+                incoming_subpaths = {item["rel_sub"] for item in prepared}
+                if existing_disk_files == incoming_subpaths:
+                    is_exact_duplicate = True
+                    matched_cand_dir = cand_dir
+                    break
+
+            version_idx += 1
+
+        chosen_version_id = "v001" if version_idx == 1 else f"v{version_idx:03d}"
+
+        if is_exact_duplicate:
+            # 检查在当前运行批次中是否已登记过该目录候选
+            already_registered = any(
+                sf.path.is_relative_to(matched_cand_dir)
+                for sf in self.student_files.get(student.student_id, [])
+            )
+            if already_registered:
+                # 本批次已登记过完全相同的目录版本，记录来源并去重
+                for sf in self.student_files.get(student.student_id, []):
+                    if sf.path.is_relative_to(matched_cand_dir):
+                        if origin_entry.name not in sf.note:
+                            sf.note = f"{sf.note}; 来源: {origin_entry.name}" if sf.note else f"来源: {origin_entry.name}"
+                return []
+
+        # 写入新版本目录
+        matched_cand_dir.mkdir(parents=True, exist_ok=True)
+        created_files = []
+        dest_headers = []
+
+        for item in prepared:
+            dest_file = matched_cand_dir / item["rel_sub"]
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            if item["is_source"]:
+                dest_file.write_bytes(item["final_bytes"])
+            else:
+                shutil.copy2(item["raw_file"], dest_file)
+
+            if item["ftype"] == "header":
+                dest_headers.append(dest_file)
+
+            sf = SubmissionFile(
+                path=dest_file,
+                original_name=item["raw_file"].name,
+                file_type=item["ftype"],
+                matched_problem=item["matched_problem"],
+                is_warmup=item["is_warmup"],
+                source_encoding=item["source_encoding"],
+                encoding_converted=item["encoding_converted"],
+                encoding_error=item["encoding_error"],
+                version_id=chosen_version_id,
+                origin_path=str(origin_entry),
+                archive_rel_path=f"{group_name}/{item['rel_sub']}",
+                is_dependency=(item["ftype"] == "header"),
+            )
+            created_files.append(sf)
+
+        for sf in created_files:
+            if sf.file_type in {"c_source", "cpp_source"}:
+                sf.dependency_files = list(dest_headers)
+
+        return created_files
+
     def _classify_and_stage_file(
         self,
         student: Student,
         raw_file: Path,
         rel_path_str: str,
+        origin_entry: Optional[Path] = None,
     ) -> Optional[SubmissionFile]:
         """识别文件题号、保留相对子目录结构，安全拷贝至 labX/src/<student_id>/"""
         ext = raw_file.suffix.lower()
         is_source = ext in ALLOWED_SOURCE_EXTS
-        if is_source:
-            ftype = "c_source" if ext in {".c", ".h"} else "cpp_source"
+        if ext in {".h", ".hpp"}:
+            ftype = "header"
+        elif ext == ".c":
+            ftype = "c_source"
+        elif is_source:
+            ftype = "cpp_source"
         elif ext in ALLOWED_IMAGE_EXTS:
             ftype = "image"
         elif ext in ALLOWED_DOC_EXTS:
@@ -899,42 +1167,7 @@ class SubmissionNormalizer:
         name_lower = raw_file.name.lower()
         search_target = f"{rel_path_str} {raw_file.name}".lower()
         is_warmup = bool(re.search(r"warm\s*up|热身", search_target))
-
-        matched_problem = None
-        if self.lab_name == "lab1":
-            # 严格边界匹配 1-3 与 1-2，避免学号中包含 "12"（如 20261112xx）或 "13" 导致误判
-            is_p13 = bool(re.search(r"lab\s*1\s*[-_.]?\s*3(?!\d)|(?<!\d)1\s*[-_.]\s*3(?!\d)|(?<!\d)13(?!\d)|温度", search_target))
-            is_p12 = bool(re.search(r"lab\s*1\s*[-_.]?\s*2(?!\d)|(?<!\d)1\s*[-_.]\s*2(?!\d)|(?<!\d)12(?!\d)|逻辑|验算|草稿|演草", search_target))
-            if is_p13 and not is_p12:
-                matched_problem = "1-3"
-            elif is_p12 and not is_p13:
-                matched_problem = "1-2"
-            elif is_p13 and is_p12:
-                if "1-3" in search_target or "1_3" in search_target or "1.3" in search_target:
-                    matched_problem = "1-3"
-                else:
-                    matched_problem = "1-2"
-            elif ftype == "image":
-                matched_problem = "1-2"
-            elif ftype in ("c_source", "cpp_source"):
-                # 内容兜底分析（针对如张辰越将 Lab 1-2 源码误命名为 Lab 1-1 等情况）
-                # 统一使用严格解码规范化后的文本，严禁使用 errors="ignore" 掩盖乱码
-                if content_for_matching:
-                    if any(op in content_for_matching for op in ["!x", "x||y", "x&&y", "~x", "x|y", "x&y"]):
-                        matched_problem = "1-2"
-                    elif any(kw in content_for_matching.lower() for kw in ["32", "celsius", "fahrenheit", "centigrade", "华氏", "摄氏"]):
-                        matched_problem = "1-3"
-        elif self.lab_name == "lab2":
-            if is_warmup:
-                matched_problem = "warmup"
-            elif re.search(r"lab\s*2\s*[-_.]?\s*1(?!\d)|(?<!\d)2\s*[-_.]\s*1(?!\d)|(?<!\d)21(?!\d)|问候", search_target):
-                matched_problem = "2-1"
-            elif re.search(r"lab\s*2\s*[-_.]?\s*2(?!\d)|(?<!\d)2\s*[-_.]\s*2(?!\d)|(?<!\d)22(?!\d)|金字塔", search_target):
-                matched_problem = "2-2"
-            elif re.search(r"lab\s*2\s*[-_.]?\s*3(?!\d)|(?<!\d)2\s*[-_.]\s*3(?!\d)|(?<!\d)23(?!\d)|回文", search_target):
-                matched_problem = "2-3"
-            elif re.search(r"lab\s*2\s*[-_.]?\s*4(?!\d)|(?<!\d)2\s*[-_.]\s*4(?!\d)|(?<!\d)24(?!\d)|编码器", search_target):
-                matched_problem = "2-4"
+        matched_problem = self._match_problem(search_target, ftype, content_for_matching)
 
         target_student_dir = self.src_dir / student.student_id
         target_student_dir.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1210,8 @@ class SubmissionNormalizer:
                 break
 
         target_file_path = matched_target_path
+        version_id = "v001" if curr_alt_idx == 1 else f"v{curr_alt_idx:03d}"
+        origin_path_str = str(origin_entry) if origin_entry else str(raw_file)
 
         if write_needed:
             if is_source:
@@ -993,4 +1228,8 @@ class SubmissionNormalizer:
             source_encoding=source_encoding,
             encoding_converted=encoding_converted,
             encoding_error=encoding_error,
+            version_id=version_id,
+            origin_path=origin_path_str,
+            archive_rel_path=rel_path_str,
+            is_dependency=(ftype == "header"),
         )

@@ -1966,6 +1966,106 @@ int main() {
                 self.roster_mgr.students.remove(std_c)
             self.roster_mgr.by_id.pop(std_c.student_id, None)
 
+    def test_46_multi_zip_version_naming_and_deduplication(self):
+        """测试46: 多个独立ZIP中的同题多源码正确保存为原名与 _alt，重复归档不产生多余副本"""
+        lab_dir = self.test_work / "test_46_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        code_v1 = '#include <stdio.h>\nint main() { printf("version 1\\n"); return 0; }\n'
+        code_v2 = '#include <stdio.h>\nint main() { printf("version 2\\n"); return 0; }\n'
+
+        zip1_path = submit_dir / f"{std.student_id}_sub1.zip"
+        with zipfile.ZipFile(zip1_path, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_v1)
+
+        zip2_path = submit_dir / f"{std.student_id}_sub2.zip"
+        with zipfile.ZipFile(zip2_path, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_v2)
+
+        normalizer1 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged1 = normalizer1.process_all_submissions()
+
+        std_files1 = staged1.get(std.student_id, [])
+        c_files1 = [f for f in std_files1 if f.file_type == "c_source"]
+        self.assertEqual(len(c_files1), 2, "应归档两份不同的源码候选")
+        names1 = sorted([f.path.name for f in c_files1])
+        self.assertEqual(names1, ["Lab1-3.c", "Lab1-3_alt.c"])
+
+        texts1 = {f.path.read_text(encoding="utf-8") for f in c_files1}
+        self.assertIn(code_v1, texts1)
+        self.assertIn(code_v2, texts1)
+
+        normalizer2 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged2 = normalizer2.process_all_submissions()
+
+        std_files2 = staged2.get(std.student_id, [])
+        c_files2 = [f for f in std_files2 if f.file_type == "c_source"]
+        self.assertEqual(len(c_files2), 2, "重复归档不得生成 _alt2 等多余副本")
+        names2 = sorted([f.path.name for f in c_files2])
+        self.assertEqual(names2, ["Lab1-3.c", "Lab1-3_alt.c"])
+
+    def test_47_header_version_isolation_and_execution(self):
+        """测试47: 包含私有头文件的独立版本完整保留目录结构，不使用其他版本的头文件，运行结果对应各自版本"""
+        lab_dir = self.test_work / "test_47_lab"
+        submit_dir = lab_dir / "submit"
+        build_dir = lab_dir / "build"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        main_c = """#include <stdio.h>
+#include "config.h"
+int main() {
+    printf("SCALE=%d\\n", SCALE);
+    return 0;
+}
+"""
+        header_v1 = "#define SCALE 10\n"
+        header_v2 = "#define SCALE 20\n"
+
+        zip1 = submit_dir / f"{std.student_id}_v1.zip"
+        with zipfile.ZipFile(zip1, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3/main.c", main_c)
+            zf.writestr(f"{std.student_id}/Lab1-3/inc/config.h", header_v1)
+
+        zip2 = submit_dir / f"{std.student_id}_v2.zip"
+        with zipfile.ZipFile(zip2, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3/main.c", main_c)
+            zf.writestr(f"{std.student_id}/Lab1-3/inc/config.h", header_v2)
+
+        normalizer = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged = normalizer.process_all_submissions()
+
+        std_files = staged.get(std.student_id, [])
+        c_files = [f for f in std_files if f.file_type == "c_source"]
+        self.assertEqual(len(c_files), 2, "两份包含不同私有头文件的独立版本均应归档")
+
+        v1_file = next(f for f in c_files if "Lab1-3/" in f.path.as_posix() and "_v002" not in f.path.as_posix())
+        v2_file = next(f for f in c_files if "Lab1-3_v002" in f.path.as_posix())
+
+        h1_text = (v1_file.path.parent / "inc" / "config.h").read_text(encoding="utf-8")
+        h2_text = (v2_file.path.parent / "inc" / "config.h").read_text(encoding="utf-8")
+        self.assertEqual(h1_text.strip(), "#define SCALE 10")
+        self.assertEqual(h2_text.strip(), "#define SCALE 20")
+
+        compiler = ProjectCompiler()
+        std_build = build_dir / std.student_id
+        res1 = compiler.compile(v1_file.path, std_build, "bin_v1")
+        res2 = compiler.compile(v2_file.path, std_build, "bin_v2")
+
+        self.assertTrue(res1.success, f"v1 编译失败: {res1.stderr}")
+        self.assertTrue(res2.success, f"v2 编译失败: {res2.stderr}")
+
+        run1 = run_binary(res1.binary_path, input_str="", timeout=2.0)
+        run2 = run_binary(res2.binary_path, input_str="", timeout=2.0)
+
+        self.assertIn("SCALE=10", run1.stdout)
+        self.assertIn("SCALE=20", run2.stdout)
+
     def test_48_nested_archive_slug_isolation(self):
         """测试48: 同名嵌套ZIP使用来源相对路径作为前缀，互不覆盖"""
         lab_dir = self.test_work / "test_48_lab"

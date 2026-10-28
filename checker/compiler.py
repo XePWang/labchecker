@@ -235,6 +235,10 @@ class ProjectCompiler:
             for inc in include_dirs:
                 inc_args.extend(["-I", str(inc.resolve())])
         inc_args.extend(["-I", str(src_path.parent.resolve())])
+        if (src_path.parent / "inc").is_dir():
+            inc_args.extend(["-I", str((src_path.parent / "inc").resolve())])
+        if (src_path.parent / "include").is_dir():
+            inc_args.extend(["-I", str((src_path.parent / "include").resolve())])
 
         sources = [src_path] + (extra_sources or [])
         # 链接库 LINKER_FLAGS (如 -lm) 必须放在 sources 之后
