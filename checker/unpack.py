@@ -627,27 +627,43 @@ class SubmissionNormalizer:
                 if entry.is_file() and entry.suffix.lower() in KNOWN_ARCHIVE_EXTS:
                     unpack_dest = WORK_DIR / f"{self.lab_name}_unpack" / f"{sid}_{entry.stem}"
                     unpack_dest.mkdir(parents=True, exist_ok=True)
-                    success, msg, files = self.extractor.extract_archive(entry, unpack_dest, recursive=True)
-                    if not success:
-                        # 记录已收到该学生压缩包，但文件损坏无法解压，保留在学生目录中
-                        student_src_dir = self.src_dir / sid
-                        student_src_dir.mkdir(parents=True, exist_ok=True)
-                        dest_archive = student_src_dir / entry.name
-                        try:
-                            if not dest_archive.exists() or dest_archive.resolve() != entry.resolve():
-                                shutil.copy2(entry, dest_archive)
-                        except Exception:
-                            dest_archive = entry
+                    sig_file = unpack_dest / ".unpack_sig"
+                    curr_sig = f"{entry.stat().st_size}_{entry.stat().st_mtime_ns}"
+                    existing = [p for p in unpack_dest.iterdir() if p.name not in IGNORED_PATTERNS and p.name != ".unpack_sig"]
+                    need_extract = False
+                    if not existing:
+                        need_extract = True
+                    elif not sig_file.exists() or sig_file.read_text(encoding="utf-8").strip() != curr_sig:
+                        shutil.rmtree(unpack_dest, ignore_errors=True)
+                        unpack_dest.mkdir(parents=True, exist_ok=True)
+                        need_extract = True
 
-                        corrupt_file = SubmissionFile(
-                            path=dest_archive,
-                            original_name=entry.name,
-                            file_type="corrupt_archive",
-                            note=f"解压失败: {msg}",
-                        )
-                        self.student_files.setdefault(sid, []).append(corrupt_file)
-                        continue
-                    extracted_items = files
+                    if need_extract:
+                        success, msg, files = self.extractor.extract_archive(entry, unpack_dest, recursive=True)
+                        if not success:
+                            # 记录已收到该学生压缩包，但文件损坏无法解压，保留在学生目录中
+                            student_src_dir = self.src_dir / sid
+                            student_src_dir.mkdir(parents=True, exist_ok=True)
+                            dest_archive = student_src_dir / entry.name
+                            try:
+                                if not dest_archive.exists() or dest_archive.resolve() != entry.resolve():
+                                    shutil.copy2(entry, dest_archive)
+                            except Exception:
+                                dest_archive = entry
+
+                            corrupt_file = SubmissionFile(
+                                path=dest_archive,
+                                original_name=entry.name,
+                                file_type="corrupt_archive",
+                                note=f"解压失败: {msg}",
+                                origin_path=str(entry),
+                            )
+                            self.student_files.setdefault(sid, []).append(corrupt_file)
+                            continue
+                        sig_file.write_text(curr_sig, encoding="utf-8")
+                        extracted_items = files
+                    else:
+                        extracted_items = [p for p in unpack_dest.rglob("*") if p.is_file() and p.name not in IGNORED_PATTERNS and p.name != ".unpack_sig"]
                     root_dir = unpack_dest
                 elif entry.is_dir():
                     for root, _, fs in os.walk(entry):

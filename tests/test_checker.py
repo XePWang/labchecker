@@ -2031,5 +2031,35 @@ int main() {
         self.assertIn(code_1, texts)
         self.assertIn(code_2, texts)
 
+    def test_50_container_cache_invalidation_and_idempotence(self):
+        """测试50: 修改容器ZIP内容后重新归档，能够重新解压最新内容并完成评测"""
+        lab_dir = self.test_work / "test_50_lab"
+        submit_dir = lab_dir / "submit"
+        submit_dir.mkdir(parents=True, exist_ok=True)
+
+        std = self.roster_mgr.students[0]
+
+        code_v1 = '#include <stdio.h>\nint main() { printf("original\\n"); return 0; }\n'
+        code_v2 = '#include <stdio.h>\nint main() { printf("updated\\n"); return 0; }\n'
+
+        container_zip = submit_dir / f"{std.student_id}_container.zip"
+        with zipfile.ZipFile(container_zip, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_v1)
+
+        normalizer1 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged1 = normalizer1.process_all_submissions()
+        file1 = staged1[std.student_id][0]
+        self.assertIn("original", file1.path.read_text(encoding="utf-8"))
+
+        import time
+        time.sleep(0.05)
+        with zipfile.ZipFile(container_zip, "w") as zf:
+            zf.writestr(f"{std.student_id}/Lab1-3.c", code_v2)
+
+        normalizer2 = SubmissionNormalizer(self.roster_mgr, "lab1", lab_dir)
+        staged2 = normalizer2.process_all_submissions()
+        file2 = staged2[std.student_id][0]
+        self.assertIn("updated", file2.path.read_text(encoding="utf-8"), "容器更新后应解压最新内容并更新归档")
+
 if __name__ == "__main__":
     unittest.main()
