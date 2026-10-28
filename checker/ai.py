@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from checker.config import AGY_CLI_PATH, AGY_MODEL, AGY_TIMEOUT_SECONDS, WORK_DIR
+from checker.scoring import money
 
 import threading
 
@@ -271,7 +272,7 @@ class HandwrittenReviewer:
 3. 推导部分0.80：手写结果与实际运算对应且没有明显错误，倾向给满。简写、未逐项列竖式、小笔误或表达不精细不酌情扣分。
 仅将有清晰证据的实质运算错误记入 clear_error_operators，error_evidence 逐条说明纸面内容、正确结果及错误原因。derivation_score 使用0～0.80的连续分值；无明确实质错误时给0.80，有明确错误才结合错误程度评分，不按书写细节酌情扣分。
 确无有效验算内容才将 no_valid_derivation 设为true。字迹无法辨认、结果无法确认则 derivation_uncertain=true 并说明，不把未知当错误。
-所有字段描述真实观察事实；程序在AI推导分基础上统一处理身份分和参数额外扣分。
+所有字段描述真实观察事实；推导连续分无需预先舍入，程序统一四舍五入到分，并处理身份分和参数额外扣分。
 
 【严格校验与输出约定】
 task_id 必须为 "{cls.EXPECTED_TASK_ID}"。
@@ -387,10 +388,10 @@ info_score 范围0.0~0.5，xy_match_score 范围0.0~0.2，derivation_score 范�
         raw_derivation = res.get("observed_derivation_score", res.get("derivation_score", 0.8))
         res["observed_derivation_score"] = raw_derivation
         base_derivation = 0.0 if no_valid else max(0.0, min(0.8, float(raw_derivation))) if errors else 0.8
-        base_derivation = round(base_derivation, 2)
-        error_deduction = round(0.8 - base_derivation, 2)
+        base_derivation = money(base_derivation)
+        error_deduction = money(0.8 - base_derivation)
         parameter_penalty = 0.2 * len(mismatches)
-        derivation = max(0.0, round(base_derivation - parameter_penalty, 2))
+        derivation = max(0.0, money(base_derivation - parameter_penalty))
 
         original_reason = str(res.get("observation_review_reason", res.get("review_reason", "")))
         original_review = bool(res.get("observation_needs_review", res.get("needs_review")))
@@ -413,9 +414,9 @@ info_score 范围0.0~0.5，xy_match_score 范围0.0~0.2，derivation_score 范�
             info_score=0.0 if conflicts else 0.5,
             xy_match_score=0.2,
             derivation_score=derivation,
-            derivation_base_score=round(base_derivation, 2),
-            derivation_error_deduction=round(error_deduction, 2),
-            parameter_penalty=round(parameter_penalty, 2),
+            derivation_base_score=money(base_derivation),
+            derivation_error_deduction=money(error_deduction),
+            parameter_penalty=money(parameter_penalty),
             parameter_mismatches=mismatches,
             clear_error_operators=errors,
             identity_conflict=bool(conflicts),
@@ -424,7 +425,7 @@ info_score 范围0.0~0.5，xy_match_score 范围0.0~0.2，derivation_score 范�
             is_pending=uncertain,
             grading_policy_version="lab1-20261028-full-credit-v1",
         )
-        res["suggested_score"] = None if uncertain else round(res["info_score"] + 0.2 + derivation, 2)
+        res["suggested_score"] = None if uncertain else money(res["info_score"] + 0.2 + derivation)
         return res
 
     @classmethod

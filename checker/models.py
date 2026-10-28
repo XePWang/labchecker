@@ -117,6 +117,11 @@ class ProblemResult:
     check_items: List[CheckItem] = field(default_factory=list)
     candidate_evaluations: List[Dict[str, Any]] = field(default_factory=list)
     chosen_candidate: Optional[Dict[str, Any]] = None
+    # Lab policy declares the budget and exclusive group membership; the common
+    # layer calculates the score, displayed cents and all group deductions.
+    case_budget: Optional[float] = None
+    case_groups: Dict[str, List[int]] = field(default_factory=dict)
+    case_component: Optional[str] = None
 
 
 @dataclass

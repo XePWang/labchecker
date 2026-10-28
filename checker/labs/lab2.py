@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from checker.ai import SemanticAmbiguityReviewer
 from checker.compiler import ProjectCompiler
+from checker.scoring import scored_problem
 from checker.labs.base import BaseLabJudge
 from checker.models import (
     CheckItem,
@@ -115,7 +116,7 @@ class Lab2Judge(BaseLabJudge):
 
         return tasks
 
-    def grade_student(
+    def _grade_student(
         self,
         student: Student,
         files: List[SubmissionFile],
@@ -203,9 +204,9 @@ class Lab2Judge(BaseLabJudge):
             grade.status = "graded"
 
         # 生成评语
-        grade.comment = self.generate_comment(grade)
         return grade
 
+    @scored_problem("2-1")
     def _grade_lab2_1(
         self,
         student: Student,
@@ -361,10 +362,7 @@ class Lab2Judge(BaseLabJudge):
                 "success": c_compile.success,
             })
 
-        best_eval = max(
-            cand_evaluations,
-            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0, -x["cand_idx"])
-        )
+        best_eval = cand_evaluations[0]
         src_path = best_eval["src_path"]
         c_res = best_eval["c_res"]
         prob.compile_result = c_res
@@ -524,7 +522,7 @@ class Lab2Judge(BaseLabJudge):
 
             valid_test_res = best_eval["test_results"][:10]
             valid_passed = sum(1 for c in valid_test_res if c.passed)
-            valid_ded = round(1.50 * (1 - valid_passed / 10), 2)
+            valid_ded = 2.0 * (10-valid_passed) / total_cases
             has_pending = any(c.needs_review for c in valid_test_res)
             v_status = "已达成" if valid_ded == 0 else ("部分达成" if valid_passed > 0 else "未达成")
             if has_pending:
@@ -543,7 +541,7 @@ class Lab2Judge(BaseLabJudge):
 
             invalid_test_res = best_eval["test_results"][10:12]
             invalid_passed = sum(1 for c in invalid_test_res if c.passed)
-            inv_ded = round(0.50 * (1 - invalid_passed / 2), 2)
+            inv_ded = 2.0 * (2-invalid_passed) / total_cases
             inv_status = "已达成" if inv_ded == 0 else ("部分达成" if invalid_passed > 0 else "未达成")
             items.append(CheckItem(
                 problem_id="2-1",
@@ -558,6 +556,8 @@ class Lab2Judge(BaseLabJudge):
             ))
 
         prob.check_items = items
+        prob.case_budget = 2.0
+        prob.case_groups = {'时间段问候逻辑':list(range(10)), '边界与无效输入处理':[10,11]}
 
         if not c_res.success:
             prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
@@ -580,6 +580,7 @@ class Lab2Judge(BaseLabJudge):
             prob.notes.append(f"检测到 {len(sources)} 份 2-1 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/2.00)")
         return prob
 
+    @scored_problem("2-2")
     def _grade_lab2_2(
         self,
         student: Student,
@@ -762,10 +763,7 @@ class Lab2Judge(BaseLabJudge):
                 "success": c_compile.success,
             })
 
-        best_eval = max(
-            cand_evaluations,
-            key=lambda x: (x["score"], x["passed_cases"], 1 if x["success"] else 0, -x["cand_idx"])
-        )
+        best_eval = cand_evaluations[0]
         src_path = best_eval["src_path"]
         c_res = best_eval["c_res"]
         prob.compile_result = c_res
@@ -947,7 +945,7 @@ class Lab2Judge(BaseLabJudge):
 
             pyr_cases = [best_eval["test_results"][0], best_eval["test_results"][2], best_eval["test_results"][5]]
             passed_pyr = sum(1 for c in pyr_cases if c.passed)
-            ded_pyr = round(2.00 * (1 - passed_pyr / 3), 2)
+            ded_pyr = 3.0 * (3-passed_pyr) / total_cases
             pyr_status = "已达成" if ded_pyr == 0 else ("部分达成" if passed_pyr > 0 else "未达成")
             items.append(CheckItem(
                 problem_id="2-2",
@@ -962,7 +960,7 @@ class Lab2Judge(BaseLabJudge):
             ))
 
             case_f = best_eval["test_results"][1]
-            ded_f = 0.0 if case_f.passed else 0.50
+            ded_f = 0.0 if case_f.passed else 3.0 / total_cases
             items.append(CheckItem(
                 problem_id="2-2",
                 sub_item="大小写字母兼容转换",
@@ -977,7 +975,7 @@ class Lab2Judge(BaseLabJudge):
 
             err_cases = [best_eval["test_results"][3], best_eval["test_results"][4]]
             passed_err = sum(1 for c in err_cases if c.passed)
-            ded_err = round(0.50 * (1 - passed_err / 2), 2)
+            ded_err = 3.0 * (2-passed_err) / total_cases
             err_status = "已达成" if ded_err == 0 else ("部分达成" if passed_err > 0 else "未达成")
             items.append(CheckItem(
                 problem_id="2-2",
@@ -992,6 +990,8 @@ class Lab2Judge(BaseLabJudge):
             ))
 
         prob.check_items = items
+        prob.case_budget = 3.0
+        prob.case_groups = {'字母对称金字塔展开 (A~Z)':[0,2,5], '大小写字母兼容转换':[1], '非字母与异常输入报错':[3,4]}
 
         if not c_res.success:
             prob.status = "needs_review" if (prob.is_pending or prob.needs_review) else "compile_error"
@@ -1014,130 +1014,79 @@ class Lab2Judge(BaseLabJudge):
             prob.notes.append(f"检测到 {len(sources)} 份 2-2 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/3.00)")
         return prob
 
-    def _grade_lab2_3(
-        self,
-        student: Student,
-        sources: List[Path],
-        build_dir: Path,
-        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
-    ) -> ProblemResult:
-        """选做题 Lab 2-3：回文素数"""
-        prob = ProblemResult(problem_id="2-3", score=0.0, max_score=0.0, source_files=sources)
-        best_status = "compile_error"
-        best_note = "选做题2-3未能编译通过"
-        best_c_res = None
-        for idx, src in enumerate(sources):
-            if precompiled and (student.student_id, "2-3", idx) in precompiled:
-                c_res = precompiled[(student.student_id, "2-3", idx)]
-            else:
-                c_res = self.compiler.compile(src, build_dir, f"lab2_3_cand_{idx}")
-            if not best_c_res:
-                best_c_res = c_res
-            if c_res.success:
-                best_c_res = c_res
-                exec_res = run_binary(c_res.binary_path, input_str="5 500\n", timeout=5.0)
-                nums = [int(n) for n in re.findall(r"\b\d+\b", exec_res.stdout)]
-                expected = [5, 7, 11, 101, 131, 151, 181, 191, 313, 353, 373, 383]
-                if nums == expected:
-                    best_status = "passed"
-                    best_note = "选做题2-3回文素数测试完全正确"
-                    break
-                else:
-                    best_status = "partial"
-                    best_note = f"选做题2-3结果部分匹配 (输出 {len(nums)} 个回文素数)"
-        prob.status = best_status
-        prob.notes.append(best_note)
-        prob.compile_result = best_c_res
+    @scored_problem("2-3")
+    def _grade_lab2_3(self, student, sources, build_dir, precompiled=None):
+        """选做题不计分，但每个独立版本都记录完整用例与最终选择。"""
+        prob = ProblemResult('2-3', 0.0, 0.0, source_files=sources)
+        if not sources:
+            prob.status = 'missing'
+            return prob
+        compiled = (precompiled or {}).get((student.student_id, '2-3', 0))
+        prob.compile_result = compiled or self.compiler.compile(sources[0], build_dir, 'lab2_3_cand_0')
+        if not prob.compile_result.success:
+            prob.status = 'compile_error'
+            prob.check_items=[CheckItem(prob.problem_id,'选做题实测验收','已提交','未达成',prob.compile_result.stderr,0.0,'选做题不计分')]
+            return prob
+        execution = run_binary(prob.compile_result.binary_path, input_str='5 500\n', timeout=5.0)
+        expected = [5,7,11,101,131,151,181,191,313,353,373,383]
+        actual = [int(n) for n in re.findall(r'\b\d+\b', execution.stdout)]
+        ran = not execution.timed_out and execution.exit_code == 0
+        facts = [(str(value),ran and value in actual) for value in expected]
+        facts.append(('完整有序序列，无遗漏或多余元素',ran and actual==expected))
+        prob.test_results = [TestCaseResult(f'check_{i+1}','5 500',label,execution.stdout,passed,0.0,0.0,
+            timed_out=execution.timed_out,exit_code=execution.exit_code) for i,(label,passed) in enumerate(facts)]
+        count=sum(c.passed for c in prob.test_results)
+        prob.status='passed' if count==len(facts) else 'partial' if count else 'failed'
+        prob.notes = ['选做题2-3回文素数测试完全正确' if prob.status=='passed' else '选做题2-3结果未完整匹配标准序列']
+        prob.check_items=[CheckItem('2-3','选做题实测验收','已提交','已达成' if prob.status=='passed' else '部分达成' if count else '未达成',
+            f'输入5 500；通过{count}/{len(facts)}项检查；实际输出:{execution.stdout}',0.0,'选做题不计分')]
         return prob
 
-    def _grade_lab2_4(
-        self,
-        student: Student,
-        sources: List[Path],
-        build_dir: Path,
-        precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
-    ) -> ProblemResult:
-        """选做题 Lab 2-4：4:2 优先编码器"""
-        prob = ProblemResult(problem_id="2-4", score=0.0, max_score=0.0, source_files=sources)
-        best_status = "compile_error"
-        best_note = "选做题2-4未能编译通过"
-        best_c_res = None
-        for idx, src in enumerate(sources):
-            if precompiled and (student.student_id, "2-4", idx) in precompiled:
-                c_res = precompiled[(student.student_id, "2-4", idx)]
-            else:
-                c_res = self.compiler.compile(src, build_dir, f"lab2_4_cand_{idx}")
-            if not best_c_res:
-                best_c_res = c_res
-            if c_res.success:
-                best_c_res = c_res
-                res1 = run_binary(c_res.binary_path, input_str="1010\n", timeout=2.0)
-                res2 = run_binary(c_res.binary_path, input_str="0000\n", timeout=2.0)
-                ok1 = "11" in res1.stdout or "a3" in res1.stdout.lower()
-                ok2 = any(w in res2.stdout for w in ["没有", "非编码", "0", "flag=0", "inactive"])
-                if ok1 and ok2:
-                    best_status = "passed"
-                    best_note = "选做题2-4优先编码器功能测试完全正确"
-                    break
-                else:
-                    best_status = "partial"
-                    best_note = "选做题2-4部分逻辑有偏差"
-        prob.status = best_status
-        prob.notes.append(best_note)
-        prob.compile_result = best_c_res
+    @scored_problem("2-4")
+    def _grade_lab2_4(self, student, sources, build_dir, precompiled=None):
+        prob = ProblemResult('2-4', 0.0, 0.0, source_files=sources)
+        if not sources:
+            prob.status = 'missing'
+            return prob
+        compiled = (precompiled or {}).get((student.student_id, '2-4', 0))
+        prob.compile_result = compiled or self.compiler.compile(sources[0], build_dir, 'lab2_4_cand_0')
+        if not prob.compile_result.success:
+            prob.status = 'compile_error'
+            prob.check_items=[CheckItem(prob.problem_id,'选做题实测验收','已提交','未达成',prob.compile_result.stderr,0.0,'选做题不计分')]
+            return prob
+        for index,input_text in enumerate(['1010\n','0000\n']):
+            execution = run_binary(prob.compile_result.binary_path,input_str=input_text,timeout=2.0)
+            matched = ('11' in execution.stdout or 'a3' in execution.stdout.lower()) if index==0 else any(w in execution.stdout for w in ['没有','非编码','0','flag=0','inactive'])
+            passed = matched and not execution.timed_out and execution.exit_code==0
+            prob.test_results.append(TestCaseResult(f'case_{index+1}',input_text.strip(),
+                '11或a3' if index==0 else '无有效输入/flag=0',execution.stdout,passed,0.0,0.0,
+                timed_out=execution.timed_out,exit_code=execution.exit_code))
+        count=sum(c.passed for c in prob.test_results)
+        prob.status = 'passed' if count==len(prob.test_results) else 'partial' if count else 'failed'
+        prob.notes = ['选做题2-4优先编码器功能测试完全正确' if prob.status=='passed' else '选做题2-4部分逻辑有偏差']
+        prob.check_items=[CheckItem('2-4','选做题实测验收','已提交','已达成' if prob.status=='passed' else '部分达成' if count else '未达成',
+            '; '.join(f'输入{c.input_data}，输出{c.actual_output}' for c in prob.test_results),0.0,'选做题不计分')]
         return prob
 
     def generate_comment(self, grade: StudentGrade) -> str:
-        """生成不少于 50 字的定制评语"""
-        student = grade.student
-        r2_1 = grade.problem_results.get("2-1")
-        r2_2 = grade.problem_results.get("2-2")
-        has_warmup = bool(grade.problem_results.get("warmup") and grade.problem_results["warmup"].source_files)
-        has_optional = bool(grade.optional_results)
-
-        parts = [f"{student.name}同学你好！本次实验2重点考核分支判断、循环嵌套与字符处理逻辑。"]
-
-        if grade.status == "missing":
-            return f"{student.name}同学你好！系统未检测到你在实验2提交的有效源程序，请及时排查是否压缩包命名规范或未在截止时间前上传。请尽快联系助教补交，以确保本次实验平时成绩的有效录入。"
-
-        corrupt_reasons = [r for r in grade.review_reasons if "提交压缩包损坏" in r or "解压失败" in r]
-        if corrupt_reasons and grade.status == "needs_review":
-            return f"{student.name}同学你好！系统已检测并记录到你提交的实验2压缩包，但文件损坏无法正常解压，导致无法提取源码进行自动化评测；系统已保留你的提交记录并标记为待人工复核，请尽快联系课程助教重新提交有效的压缩包文件进行成绩复核。"
-
-        if has_warmup:
-            parts.append("积极完成了热身练习，编程态度值得表扬；")
-
-        # 2-1 评述
-        if r2_1:
-            if r2_1.status == "passed":
-                parts.append("Lab 2-1时间问候程序逻辑清晰，精确覆盖了各时段分界点与非法输入测试；")
-            elif r2_1.status == "partial":
-                parts.append("Lab 2-1基本实现了时间分支，但在边界条件或非法值判断上存在疏漏，需细化if分支；")
-            elif r2_1.status == "compile_error":
-                parts.append("Lab 2-1程序编译异常，请注意检查基础语法与变量定义；")
-            elif r2_1.status == "needs_review":
-                parts.append("Lab 2-1时间问候程序已提交但存在待复核事项，系统已保留记录待人工核验；")
+        if grade.status == 'missing':
+            return f"{grade.student.name}同学你好！本次实验2未检测到可归属的源码提交，请核对提交记录和文件内容，并联系助教确认是否已经收到材料，以便完成实验成绩与提交情况的核验。"
+        parts=[f"{grade.student.name}同学你好！本次实验2验收如下："]
+        for pid,p in grade.problem_results.items():
+            if not p.max_score:
+                continue
+            if p.compile_result and p.compile_result.success:
+                parts.append(f"Lab {pid}通过编译，实际用例通过{sum(c.passed for c in p.test_results)}/{len(p.test_results)}项。")
+            elif p.compile_result:
+                parts.append(f"Lab {pid}编译失败，运行结果无法验证。")
             else:
-                parts.append("Lab 2-1未能通过基础问候语测试，请强化条件分支训练；")
-
-        # 2-2 评述
-        if r2_2:
-            if r2_2.status == "passed":
-                parts.append("Lab 2-2字母金字塔算法功底扎实，循环控制与字母镜像对称逻辑构建得非常漂亮！")
-            elif r2_2.status == "partial":
-                parts.append("Lab 2-2生成了字母金字塔，但在大小写转换或非字母错误处理上尚有优化空间。")
-            elif r2_2.status == "compile_error":
-                parts.append("Lab 2-2未能编译成功，建议在本地集成环境中单步调试循环。")
-            elif r2_2.status == "needs_review":
-                parts.append("Lab 2-2字母金字塔程序已提交但存在编码异常或待复核事项，系统已保留记录待人工核验；")
-            else:
-                parts.append("Lab 2-2字符循环逻辑有误，需深入理解嵌套循环索引变量的变化规律。")
-
-        if has_optional:
-            parts.append("同时探索并提交了选做拓展题，体现了优秀的自主学习探究能力。")
-
-        comment = "".join(parts)
-        if len(comment) < 50:
-            comment += "整体实验表现良好，望在后续大作业中继续保持严谨求实的编程习惯！"
-
-        return comment
+                parts.append(f"Lab {pid}未取得可验证源码。")
+            for item in p.check_items:
+                if item.deduction:
+                    parts.append(f"{item.sub_item}：{item.deduction_reason}。")
+            if p.is_pending:
+                parts.append('该题存在未定事实，请根据复核清单核验。')
+        if grade.optional_results:
+            parts.append('选做题按各自实测用例记录完成情况，不计入必做题总分。')
+        parts.append('请对照每项输入、实际输出和检查证据核对反馈，已确认错误按对应均分计扣，待定事项保留人工复核。')
+        return ''.join(parts)

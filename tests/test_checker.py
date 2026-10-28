@@ -30,18 +30,15 @@ class TestCheckerSystem(unittest.TestCase):
         cls.test_work = WORK_DIR / "test_runs"
         cls.test_work.mkdir(parents=True, exist_ok=True)
 
-        # 若真实点名册存在则加载，否则动态构造脱敏单测专用花名册
+        # Tests must never depend on a teacher's real roster or student data.
         cls.roster_mgr = RosterManager()
-        if DEFAULT_ROSTER_PATH.exists():
-            cls.roster_mgr.load_roster(DEFAULT_ROSTER_PATH)
-        else:
-            cls.roster_mgr.students = [
-                Student(seq=1, student_id="2026000067", name="测试生甲", class_id="260101"),
-                Student(seq=2, student_id="2026000090", name="测试生乙", class_id="260101"),
-            ]
-            for s in cls.roster_mgr.students:
-                cls.roster_mgr.by_id[s.student_id] = s
-                cls.roster_mgr.by_name.setdefault(s.name, []).append(s)
+        cls.roster_mgr.students = [
+            Student(seq=1, student_id='2026000067', name='测试生甲', class_id='260101'),
+            Student(seq=2, student_id='2026000090', name='测试生乙', class_id='260101'),
+        ]
+        for student in cls.roster_mgr.students:
+            cls.roster_mgr.by_id[student.student_id] = student
+            cls.roster_mgr.by_name.setdefault(student.name, []).append(student)
 
     @classmethod
     def tearDownClass(cls):
@@ -667,6 +664,9 @@ int main() {
         g = StudentGrade(student=s1, total_score=5.0, status="graded", comment="学生甲全对" + "。" * 40)
         p1 = ProblemResult(problem_id="1-2", score=3.0, max_score=3.0, status="passed")
         p2 = ProblemResult(problem_id="1-3", score=2.0, max_score=2.0, status="passed")
+        from checker.models import CheckItem
+        p1.check_items=[CheckItem('1-2','源码与手写验收','已提交','已达成','受控测试验收事实',0.0)]
+        p2.check_items=[CheckItem('1-3','温度用例验收','已提交','已达成','受控测试验收事实',0.0)]
         g.problem_results["1-2"] = p1
         g.problem_results["1-3"] = p2
 
@@ -1235,10 +1235,13 @@ int main() {
         p1_2 = ProblemResult(problem_id="1-2", score=2.5, max_score=3.0, needs_review=True)
         p1_2.check_items = [
             CheckItem(problem_id="1-2", sub_item="源码提交", submission_status="已提交", completion_status="已达成", evidence="main.c", needs_review=False),
-            CheckItem(problem_id="1-2", sub_item="演草纸学生身份一致性", submission_status="已提交", completion_status="未达成", evidence="身份冲突", needs_review=True),
+            CheckItem(problem_id="1-2", sub_item="演草纸学生身份一致性", submission_status="已提交", completion_status="未达成", evidence="身份冲突", deduction=0.5, needs_review=True),
         ]
         grade.problem_results["1-1"] = p1_1
         grade.problem_results["1-2"] = p1_2
+        grade.problem_results['1-3']=ProblemResult('1-3',0.0,2.0,status='missing',
+            check_items=[CheckItem('1-3','源码提交','未提交','未达成','受控缺交事实',2.0)])
+        grade.total_score=2.5
 
         out_dir = self.test_work / "out_reporter_localize"
         reporter = LabReporter("lab1", out_dir)

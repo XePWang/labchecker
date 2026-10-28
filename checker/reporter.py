@@ -8,6 +8,10 @@ checker.reporter
   5. 单人重判独立导出与批次安全合并
 """
 import csv
+import json
+
+from checker.scoring import validate_grade, ScoringConsistencyError, cents
+from checker.state import SCHEMA_VERSION, grade_to_dict, grade_from_dict
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +27,43 @@ class LabReporter:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _prepare(grades):
+        for grade in grades.values():
+            validate_grade(grade)
+
+    @staticmethod
+    def _problem_cells(grade,pid):
+        p=(grade.problem_results.get(pid) or grade.optional_results.get(pid)) if grade else None
+        return {'题目得分':('待复核' if p.is_pending else f'{p.score:.2f}') if p else '',
+                '题目满分':f'{p.max_score:.2f}' if p else '',
+                '采用版本':(p.chosen_candidate or {}).get('filename','') if p else '',
+                '候选数':len(p.candidate_evaluations) if p else 0}
+
+    def _save_state(self, grades, mock_mode=False):
+        path = self.output_dir / f"{'mock_' if mock_mode else ''}{self.lab_id}评分状态.json"
+        payload = {'schema_version':SCHEMA_VERSION,'lab_id':self.lab_id,'mock_mode':mock_mode,
+                   'grades':{sid:grade_to_dict(g) for sid,g in grades.items()}}
+        path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,default=str,allow_nan=False),encoding='utf-8')
+        return path
+
+    @staticmethod
+    def _candidate_markdown(grades):
+        lines=['', '## 候选版本与最终选择',
+               '全部版本独立评定后择优；用例预算、分类扣分与最终分共享同一计分结果。金额按分分配舍入余数；未定事实保留复核。',
+               '', '| 学号 | 题号 | 版本 | 最终得分 | 用例通过 | 评定状态 | 采用 |',
+               '|---|---|---|---:|---|---|---|']
+        for sid,g in grades.items():
+            for pid,p in {**g.problem_results,**g.optional_results}.items():
+                selected=(p.chosen_candidate or {}).get('src_path')
+                for c in p.candidate_evaluations:
+                    state='待复核' if c.get('is_pending') else '已评定'
+                    score='待复核' if c.get('is_pending') else f"{c['score']:.2f}"
+                    name=c['filename'].replace('|','\\|')
+                    mark='是' if c['src_path']==selected else ''
+                    lines.append(f"| {sid} | {pid} | {name} | {score}/{c['max_score']:.2f} | {c['passed_cases']}/{len(c.get('test_results',[]))} | {state} | {mark} |")
+        return '\n'.join(lines)
+
     def generate_all_reports(
         self,
         roster_students: List[Student],
@@ -34,6 +75,7 @@ class LabReporter:
         encoding_stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Path]:
         """生成全套标准报表并返回文件路径字典"""
+        self._prepare(grades)
         csv_detail_path = self.generate_detail_csv(roster_students, grades, mock_mode=mock_mode)
         md_summary_path = self.generate_summary_markdown(
             roster_students,
@@ -56,6 +98,7 @@ class LabReporter:
             if xlsx_path:
                 result_paths["roster_xlsx"] = xlsx_path
 
+        result_paths['state_json'] = self._save_state(grades,mock_mode)
         return result_paths
 
     def generate_detail_csv(
@@ -69,12 +112,13 @@ class LabReporter:
         记录粒度: 学生 × 实验 × 题号 × 检查分项
         包含字段: 学号, 姓名, 实验, 题号, 评分项, 提交状态, 达成状态, 检查依据, 建议扣分, 扣分理由, Agent说明附注, 是否需要复核, 实验评语
         """
+        self._prepare(grades)
         prefix = "mock_" if mock_mode else ""
         file_path = self.output_dir / f"{prefix}{self.lab_id}结果.csv"
 
         fieldnames = [
             "学号", "姓名", "实验", "题号", "评分项", "提交状态",
-            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语"
+            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语", "题目得分", "题目满分", "采用版本", "候选数"
         ]
 
         with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -125,31 +169,28 @@ class LabReporter:
                         "Agent说明附注": it.agent_note,
                         "是否需要复核": rev_str,
                         "实验评语": student_comment,
+                        **self._problem_cells(grade,it.problem_id),
                     })
 
         return file_path
 
     def _build_default_check_items(self, student: Student, grade: Optional[StudentGrade]) -> List[CheckItem]:
         """为学生构建全量的默认检查分项"""
+        if grade and grade.status!='missing' and not grade.all_check_items and not grade.is_pending:
+            return [CheckItem('history','历史总分记录','已提交','无法验证',
+                '仅保存实验总分，缺少历史题目与用例证据；不推断各题已完成',
+                (cents(grade.max_score)-cents(grade.total_score))/100,
+                '依据已保存实验总分记录扣分合计，分项事实无法还原','缺少分项证据',True)]
+        if self.lab_id not in {'lab1','lab2'}:
+            pending=bool(grade and grade.is_pending)
+            return [CheckItem('all','实验提交','已提交' if pending else '未提交',
+                '待复核' if pending else '未达成','依实验提交与评分记录核验',
+                None if pending else (grade.max_score if grade else 5.0),needs_review=pending)]
         is_missing = not grade or grade.status == "missing"
         is_conflict = grade and (grade.status in {"ambiguous", "conflict"} or any("冲突" in r for r in grade.review_reasons))
         evidence_msg = "未检测到实验提交文件" if is_missing else ("多学号匹配冲突待复核" if is_conflict else "学生提交已评测完成")
 
         if self.lab_id == "lab2":
-            if grade and grade.total_score > 0 and not any(prob.check_items for prob in grade.problem_results.values()):
-                rem_ded = max(0.0, round(5.0 - grade.total_score, 2))
-                return [
-                    CheckItem("warmup", "课前热身练习", "已提交", "不适用", "热身练习完成", 0.0, "热身练习依规则不计入总分", "课内练习", False),
-                    CheckItem("2-1", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
-                    CheckItem("2-1", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
-                    CheckItem("2-1", "时间段问候逻辑", "已提交", "已达成", "问候逻辑测试通过", 0.0, "", "正常", False),
-                    CheckItem("2-1", "边界与无效输入处理", "已提交", "已达成", "边界与无效输入测试通过", 0.0, "", "正常", False),
-                    CheckItem("2-2", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
-                    CheckItem("2-2", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
-                    CheckItem("2-2", "字母对称金字塔展开 (A~Z)", "已提交", "已达成" if rem_ded == 0 else "部分达成", "对称金字塔展开测试通过", rem_ded, "扣除未通过部分" if rem_ded > 0 else "", "正常", False),
-                    CheckItem("2-2", "大小写字母兼容转换", "已提交", "已达成", "大小写兼容测试通过", 0.0, "", "正常", False),
-                    CheckItem("2-2", "非字母与异常输入报错", "已提交", "已达成", "异常输入报错测试通过", 0.0, "", "正常", False),
-                ]
 
             if is_missing:
                 return [
@@ -178,28 +219,6 @@ class LabReporter:
                     CheckItem("2-2", "非字母与异常输入报错", "不适用", "无法验证", evidence_msg, 0.0, "待人工复核，本项无法验证，不重复扣分", "无法验证", False),
                 ]
 
-        if grade and grade.total_score > 0 and not any(prob.check_items for prob in grade.problem_results.values()):
-            rem_ded = max(0.0, round(5.0 - grade.total_score, 2))
-            return [
-                CheckItem("1-1", "课内环境熟悉与基础代码练习", "已提交", "已达成", "基础练习完成", 0.0, "", "课内练习", False),
-                CheckItem("1-2", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
-                CheckItem("1-2", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
-                CheckItem("1-2", "参数学号与手机号对齐", "已提交", "已达成", "参数对齐", 0.0, "", "正常", False),
-                CheckItem("1-2", "逻辑运算(!, ||, &&)", "已提交", "已达成", "逻辑运算正确", 0.0, "", "正常", False),
-                CheckItem("1-2", "位运算(~, |, &)", "已提交", "已达成", "位运算正确", 0.0, "", "正常", False),
-                CheckItem("1-2", "有符号与无符号输出格式", "已提交", "已达成", "格式规范", 0.0, "", "正常", False),
-                CheckItem("1-2", "验算材料提交", "已提交", "已达成", "验算照片已提交", 0.0, "", "正常", False),
-                CheckItem("1-2", "姓名、学号、手机号完整性", "已提交", "已达成", "身份信息完整", 0.0, "", "正常", False),
-                CheckItem("1-2", "手写参数与身份及源码一致性", "已提交", "已达成", "参数一致", 0.0, "", "正常", False),
-                CheckItem("1-2", "六种运算展开过程完整性", "已提交", "已达成", "展开完整", 0.0, "", "正常", False),
-                CheckItem("1-2", "各验算过程与结果正确性", "已提交", "已达成", "推导准确", 0.0, "", "正常", False),
-                CheckItem("1-3", "源码提交", "已提交", "已达成", "源码已归档", 0.0, "", "正常", False),
-                CheckItem("1-3", "编译与运行", "已提交", "已达成", "编译运行成功", 0.0, "", "正常", False),
-                CheckItem("1-3", "华氏转摄氏计算", "已提交", "已达成" if rem_ded == 0 else "部分达成", "华氏转摄氏完成", rem_ded, "扣除未通过部分" if rem_ded > 0 else "", "正常", False),
-                CheckItem("1-3", "摄氏转华氏计算", "已提交", "已达成", "摄氏转华氏完成", 0.0, "", "正常", False),
-                CheckItem("1-3", "边界、负温与浮点测试", "已提交", "已达成", "边界测试完成", 0.0, "", "正常", False),
-                CheckItem("1-3", "输出精度与格式", "已提交", "已达成", "精度符合要求", 0.0, "", "正常", False),
-            ]
 
         if is_missing:
             items = [
@@ -255,13 +274,14 @@ class LabReporter:
         导出 labX实验成绩单.csv
         包含字段: 学号, 姓名, 各题验收汇总, 源码提交与正确性, 手写材料提交与正确性, 未达成项目, 建议扣分合计, 扣分依据, Agent说明附注, 待复核事项, 实验评语
         """
+        self._prepare(grades)
         prefix = "mock_" if mock_mode else ""
         file_path = self.output_dir / f"{prefix}{self.lab_id}实验成绩单.csv"
 
         ded_header = "建议扣分合计[模拟测试非正式]" if mock_mode else "建议扣分合计"
         fieldnames = [
             "学号", "姓名", "各题验收汇总", "源码提交与正确性", "手写材料提交与正确性",
-            "未达成项目", ded_header, "扣分依据", "Agent说明附注", "待复核事项", "实验评语"
+            "未达成项目", ded_header, "扣分依据", "Agent说明附注", "待复核事项", "实验评语", "总分", "满分", "成绩状态", "成绩待定"
         ]
 
         with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -287,11 +307,11 @@ class LabReporter:
                                     warmup_st = "已提交" if (prob.status == "passed" or prob.source_files) else "未提交"
                                     summaries.append(f"warmup:{warmup_st}(不计分)")
                                 elif pid == "2-1":
-                                    summaries.append(f"2-1:(得分{prob.score:.2f}/2.00)")
+                                    summaries.append("2-1:待复核" if prob.is_pending else f"2-1:(得分{prob.score:.2f}/2.00)")
                                 elif pid == "2-2":
-                                    summaries.append(f"2-2:(得分{prob.score:.2f}/3.00)")
+                                    summaries.append("2-2:待复核" if prob.is_pending else f"2-2:(得分{prob.score:.2f}/3.00)")
                                 elif pid in {"2-3", "2-4"}:
-                                    summaries.append(f"{pid}:选做(得分{prob.score:.2f})")
+                                    summaries.append(f"{pid}:选做({prob.status},通过{sum(c.passed for c in prob.test_results)}/{len(prob.test_results)},不计分)")
                         summary_problems = "; ".join(summaries) if summaries else grade.status
                 else:
                     if not grade or grade.status == "missing":
@@ -306,9 +326,9 @@ class LabReporter:
                                 elif pid == "1-2":
                                     c_sc = prob.sub_scores.get("code", 0.0)
                                     h_sc = prob.sub_scores.get("handwritten", 0.0)
-                                    summaries.append(f"1-2:(代码{c_sc:.2f}/1.50, 手写{h_sc:.2f}/1.50)")
+                                    summaries.append("1-2:待复核" if prob.is_pending else f"1-2:(代码{c_sc:.2f}/1.50, 手写{h_sc:.2f}/1.50)")
                                 elif pid == "1-3":
-                                    summaries.append(f"1-3:(得分{prob.score:.2f}/2.00)")
+                                    summaries.append("1-3:待复核" if prob.is_pending else f"1-3:(得分{prob.score:.2f}/2.00)")
                         summary_problems = "; ".join(summaries) if summaries else grade.status
 
                 # 2. 源码提交与正确性
@@ -391,6 +411,14 @@ class LabReporter:
                             else:
                                 hw_summary = "已提交演草纸，按具体检查证据评定"
 
+                if self.lab_id not in {'lab1','lab2'}:
+                    summary_problems='; '.join(f"{pid}:"+('待复核' if pr.is_pending else f'{pr.score:.2f}/{pr.max_score:.2f}') for pid,pr in grade.problem_results.items()) if grade else '未提交'
+                    src_summary='按源码、编译与用例证据记录'
+                    hw_summary='依本实验专属规则记录'
+                if grade and not grade.problem_results and grade.status!='missing':
+                    summary_problems='历史总分待复核' if grade.is_pending else f'已保存总分{grade.total_score:.2f}/{grade.max_score:.2f}，缺少题目明细'
+                    src_summary='缺少历史源码与用例证据，需核验原报告'
+                    hw_summary='缺少历史材料观察证据，需核验原报告'
                 # 4. 未达成项目
                 failed_items = [
                     f"{it.problem_id}:{it.sub_item}"
@@ -406,8 +434,8 @@ class LabReporter:
                     if it.deduction is None:
                         has_pending_ded = True
                     elif it.deduction > 0:
-                        confirmed_ded += it.deduction
-                confirmed_ded = min(5.00, round(confirmed_ded, 2))
+                        confirmed_ded += cents(it.deduction)
+                confirmed_ded = confirmed_ded / 100
 
                 if not grade or grade.status == "missing":
                     deduction_total_str = "5.00"
@@ -476,6 +504,10 @@ class LabReporter:
                     "Agent说明附注": agent_note_str,
                     "待复核事项": review_str,
                     "实验评语": comment_str,
+                    "总分": '待复核' if grade and grade.is_pending else f"{grade.total_score if grade else 0.0:.2f}",
+                    "满分": f"{grade.max_score if grade else 5.0:.2f}",
+                    "成绩状态": grade.status if grade else 'missing',
+                    "成绩待定": '是' if grade and grade.is_pending else '否',
                 })
 
         return file_path
@@ -490,7 +522,8 @@ class LabReporter:
         encoding_stats: Optional[Dict[str, Any]] = None,
     ) -> Path:
         """导出 labX报告.md"""
-        file_path = self.output_dir / f"{self.lab_id}报告.md"
+        self._prepare(grades)
+        file_path = self.output_dir / f"{'mock_' if mock_mode else ''}{self.lab_id}报告.md"
 
         total_roster = len(roster_students)
         submitted_students = [
@@ -513,7 +546,7 @@ class LabReporter:
         avg_score = round(sum(graded_scores) / len(graded_scores), 2) if graded_scores else 0.0
         max_sc = max(graded_scores) if graded_scores else 0.0
         min_sc = min(graded_scores) if graded_scores else 0.0
-        full_score_count = sum(1 for sc in graded_scores if sc >= 4.99)
+        full_score_count = sum(1 for g in grades.values() if not g.is_pending and g.total_score==g.max_score)
 
         needs_review_students = [
             (s, grades[s.student_id])
@@ -555,7 +588,7 @@ class LabReporter:
             f"- **实际提交人次**: {submitted_count} 人 ({sub_pct}%)",
             f"- **归属争议/多学号冲突**: {conflict_count} 人",
             f"- **未提交/缺考人数**: {missing_count} 人{missing_desc}",
-            f"- **基准满分 (5.0分) 人数**: {full_score_count} 人",
+            f"- **满分人数**: {full_score_count} 人",
             f"- **已定级有效平均分**: {avg_score} 分 (最高分: {max_sc}, 最低分: {min_sc})",
             f"- **待人工复核总人次**: {len(needs_review_students)} 人\n",
             "## 二、 逐题与检查分项验收达成统计",
@@ -580,16 +613,16 @@ class LabReporter:
                 "- **Warming up 课前热身 (0.0分)**：不计入成绩，单列记录完成情况。",
                 "- **Lab 2-1 时间段问候 (满分 2.0分)**：",
                 "  - 源码未提交 / 编译失败：扣 2.00 分",
-                "  - 时间段问候逻辑 (1.50分)：覆盖早、中、下午、晚、夜各时间段问候，语义一致（中英文均可）判定正确",
-                "  - 边界与无效输入处理 (0.50分)：覆盖边界值 (如 0, 12, 18, 21, 24) 及非法输入 (如负数或超出范围)",
+                "  - 12例均分2.00分，单例精确权重2/12；有效时间10例与非法输入2例按同一权重计算，分类不重复扣分",
+                "  - 分项显示由公共层分配舍入余数；用例分、分类扣分和整题总分严格对齐",
                 "- **Lab 2-2 字母金字塔 (满分 3.0分)**：",
                 "  - 源码未提交 / 编译失败：扣 3.00 分",
-                "  - 字母对称金字塔展开 (2.00分)：大写字母金字塔层层展开，严格对称 (指导书笔误 ABCBC 按对称 ABCBA 校验)",
-                "  - 大小写字母兼容转换 (0.50分)：小写字母输入需自动提升并展开",
-                "  - 非字母与异常输入报错 (0.50分)：非字母输入按指导书要求友好报错",
+                "  - 字母对称金字塔展开：三例各0.50，大写字母金字塔层层展开，严格对称 (指导书笔误 ABCBC 按对称 ABCBA 校验)",
+                "  - 大小写字母兼容转换：小写字母输入需自动提升并展开；6例均分3.00，每例0.50",
+                "  - 非字母与异常输入报错：两例各0.50，已含在6例均分预算内，不另叠加扣分",
                 "- **Lab 2-3 / Lab 2-4 选做题**：回文素数与 4:2 优先编码器，独立记录完成情况，不影响必做题 5 分基准。",
                 "> [!NOTE]",
-                "> 以上分项分值与扣分比例遵循已有评分方案，最终核准结果需经课程组人工复核清单确认。\n",
+                "> 以上分项使用与实际判分一致的均分用例预算和公共舍入分配，最终核准结果需经课程组人工复核清单确认。\n",
                 "## 四、 典型技术问题与失分剖析",
                 "1. **字母金字塔笔误兼容与严格对称**：指导书示例中包含部分排版笔误（如 `___ABCBC`），系统严格依据字母对称规律（`ABCBA`）进行多组自动化测试。",
                 "2. **大小写字母输入兼容**：部分同学未做小写字母（如 `'f'`）向大写字母的自动提升转换，直接导致分支走入非法输入或生成错误序列。",
@@ -597,7 +630,7 @@ class LabReporter:
                 "4. **源码编码与跨平台字符集**：部分提交包含非 UTF-8 编码或损坏字符，已在 submit → src 归档阶段自动识别并规范化为 UTF-8 无 BOM。\n",
                 f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
             ])
-        else:
+        elif self.lab_id == "lab1":
             lines.extend([
                 "",
                 '## 三、 已确认评分细则',
@@ -615,6 +648,10 @@ class LabReporter:
                 f"## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)",
             ])
 
+        if self.lab_id not in {'lab1','lab2'}:
+            lines.extend(['## 三、 公共评分规则',
+                '各题用例预算与分组来自评测声明；公共层统一完整候选择优、按分吸收舍入余数并校验扣分闭合。',
+                f'## 五、 待人工复核清单 (共 {len(needs_review_students)} 项)'])
         if not needs_review_students:
             lines.append("当前批次未发现待复核样本，全部用例已自动定级。\n")
         else:
@@ -677,7 +714,7 @@ class LabReporter:
             "## 七、 编译与兼容性环境处理说明",
             "- Linux 环境对标 GCC `-std=c11`，数学库 `-lm` 位于命令末尾确保符号解析无误。",
             "- 针对 Windows 平台特有的 `<windows.h>`、`<conio.h>`、`system(\"pause\")`、`scanf_s` 及 GBK 编码源码，已全自动生成 `_compat` 编译副本并保存审计日志，未改变学生核心算法与数学公式。",
-            "- 所有程序均在资源隔离沙箱下运行，隔离网络并以 tmpfs 阴影隔离宿主关键目录，进程组级流式超时强杀防范死循环与内存泄露。",
+            "- 程序运行具有资源限额、进程组超时强杀和输出截断；环境支持unshare时启用网络与文件系统隔离，否则按运行模块的降级路径执行。",
         ])
         if encoding_stats:
             conv_cnt = encoding_stats.get("converted_count", 0)
@@ -687,6 +724,7 @@ class LabReporter:
             )
         lines.append("")
 
+        lines.append(self._candidate_markdown(grades))
         file_path.write_text("\n".join(lines), encoding="utf-8")
         return file_path
 
@@ -698,6 +736,7 @@ class LabReporter:
         mock_mode: bool = False,
     ) -> Optional[Path]:
         """如果存在官方 Excel 模板，同步填写对应 sheet 并另存"""
+        self._prepare(grades)
         try:
             import openpyxl
             prefix = "mock_" if mock_mode else ""
@@ -753,11 +792,12 @@ class LabReporter:
         mock_mode: bool = False,
     ) -> Dict[str, Path]:
         """为单人重判导出专用的独立报表，避免覆盖其他学生成绩"""
+        self._prepare({student.student_id:grade})
         prefix = "mock_" if mock_mode else ""
         detail_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}结果.csv"
         fieldnames = [
             "学号", "姓名", "实验", "题号", "评分项", "提交状态",
-            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语"
+            "达成状态", "检查依据", "建议扣分", "扣分理由", "Agent说明附注", "是否需要复核", "实验评语", "题目得分", "题目满分", "采用版本", "候选数"
         ]
 
         items = grade.all_check_items if grade.all_check_items else self._build_default_check_items(student, grade)
@@ -780,6 +820,7 @@ class LabReporter:
                     "Agent说明附注": it.agent_note,
                     "是否需要复核": "是" if it.needs_review else "否",
                     "实验评语": grade.comment,
+                    **self._problem_cells(grade,it.problem_id),
                 })
 
         md_path = self.output_dir / f"single_{student.student_id}_{prefix}{self.lab_id}报告.md"
@@ -798,56 +839,56 @@ class LabReporter:
 ## 实验评语（>= 50字）
 {grade.comment}
 """
+        md_content += self._candidate_markdown({student.student_id:grade})
         md_path.write_text(md_content, encoding="utf-8")
         return {"detail_csv": detail_path, "summary_md": md_path}
 
-    def load_existing_grades_from_files(
-        self,
-        roster_students: List[Student],
-    ) -> Dict[str, StudentGrade]:
-        """从历史保存的成绩单恢复已评测学生记录"""
-        roster_csv_path = self.output_dir / f"{self.lab_id}实验成绩单.csv"
-        if not roster_csv_path.exists() and (self.output_dir / f"mock_{self.lab_id}实验成绩单.csv").exists():
-            roster_csv_path = self.output_dir / f"mock_{self.lab_id}实验成绩单.csv"
-
-        recovered: Dict[str, StudentGrade] = {}
-        roster_map = {s.student_id: s for s in roster_students}
-
-        if roster_csv_path.exists():
-            try:
-                with open(roster_csv_path, "r", encoding="utf-8-sig") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        sid = row.get("学号", "").strip()
-                        if not sid or sid not in roster_map:
-                            continue
-                        std = roster_map[sid]
-                        comm = row.get("实验评语", "").strip()
-                        ded_str = row.get("建议扣分合计", "").strip()
-                        if not ded_str:
-                            ded_str = row.get("建议扣分合计[模拟测试非正式]", "0.00").strip()
-                        is_pend = "待复核" in ded_str or "待定" in ded_str
-                        clean_ded = ded_str.replace("[模拟]", "").replace("(模拟)", "").replace("已确认扣", "").replace("分", "").split("(")[0].strip()
-                        try:
-                            ded_val = float(clean_ded)
-                        except Exception:
-                            ded_val = 0.0 if not is_pend else 0.0
-
-                        tot_sc = max(0.0, round(5.0 - ded_val, 2)) if not is_pend else 0.0
-                        review_str = row.get("待复核事项", "无").strip()
-                        nr = review_str != "无" and bool(review_str)
-
-                        g = StudentGrade(
-                            student=std,
-                            total_score=tot_sc,
-                            status="needs_review" if nr or is_pend else "graded",
-                            needs_review=nr,
-                            review_reasons=[review_str] if nr else [],
-                            is_pending=is_pend,
-                            comment=comm,
-                        )
-                        recovered[sid] = g
-            except Exception:
-                pass
-
+    def load_existing_grades_from_files(self, roster_students, mock_mode=None):
+        """Prefer complete canonical state; legacy CSV retains explicit totals only."""
+        prefix='mock_' if mock_mode else ''
+        if mock_mode is None and not ((self.output_dir/f'{self.lab_id}实验成绩单.csv').exists() or (self.output_dir/f'{self.lab_id}评分状态.json').exists()) and ((self.output_dir/f'mock_{self.lab_id}实验成绩单.csv').exists() or (self.output_dir/f'mock_{self.lab_id}评分状态.json').exists()):
+            prefix='mock_'
+        state=self.output_dir/f'{prefix}{self.lab_id}评分状态.json'
+        roster_map={s.student_id:s for s in roster_students}
+        if state.exists():
+            payload=json.loads(state.read_text(encoding='utf-8'))
+            if payload.get('schema_version')!=SCHEMA_VERSION or payload.get('lab_id')!=self.lab_id or bool(payload.get('mock_mode'))!=bool(prefix):
+                raise ScoringConsistencyError('评分状态格式、实验或模拟标识不一致')
+            recovered={sid:grade_from_dict(data) for sid,data in payload['grades'].items() if sid in roster_map}
+            for sid,g in recovered.items():
+                if g.student.student_id!=sid:
+                    raise ScoringConsistencyError('评分状态学号不一致')
+                g.student=roster_map[sid]
+            self._prepare(recovered)
+            return recovered
+        path=self.output_dir/f'{prefix}{self.lab_id}实验成绩单.csv'
+        if not path.exists():
+            return {}
+        recovered={}
+        with path.open(encoding='utf-8-sig',newline='') as stream:
+            for row in csv.DictReader(stream):
+                sid=row.get('学号','').strip()
+                if sid not in roster_map:
+                    continue
+                ded=row.get('建议扣分合计') or row.get('建议扣分合计[模拟测试非正式]','')
+                pending=row.get('成绩待定')=='是' or '待复核' in ded or '待定' in ded
+                total=row.get('总分','')
+                max_score=float(row.get('满分') or 5)
+                # Older files have no authoritative total; don't turn a possibly
+                # inconsistent deduction sum into a freshly confirmed grade.
+                legacy=not total
+                if legacy:
+                    pending=True
+                    score=0.0
+                else:
+                    score=0.0 if pending else float(total)
+                    if not pending and cents(float(ded.replace('[模拟]','').strip()))!=cents(max_score)-cents(score):
+                        raise ScoringConsistencyError('历史CSV总分与扣分合计不一致')
+                reasons=[] if row.get('待复核事项','无')=='无' else [row.get('待复核事项')]
+                if legacy:reasons.append('旧报表缺少独立总分与完整评分状态，需按原始提交重判核实')
+                else:reasons.append('CSV保留独立总分，但缺少完整题目、用例和候选状态；分项证据需核验')
+                recovered[sid]=StudentGrade(roster_map[sid],total_score=score,max_score=max_score,
+                    status='needs_review' if pending or reasons else row.get('成绩状态','graded'),
+                    is_pending=pending,needs_review=bool(pending or reasons),review_reasons=reasons,
+                    comment=row.get('实验评语',''))
         return recovered

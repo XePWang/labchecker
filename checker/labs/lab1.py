@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from checker.ai import HandwrittenReviewer, SemanticAmbiguityReviewer
 from checker.compiler import ProjectCompiler
+from checker.scoring import scored_problem
 from checker.labs.base import BaseLabJudge
 from checker.models import (
     CheckItem,
@@ -86,7 +87,7 @@ class Lab1Judge(BaseLabJudge):
 
         return tasks
 
-    def grade_student(
+    def _grade_student(
         self,
         student: Student,
         files: List[SubmissionFile],
@@ -176,7 +177,6 @@ class Lab1Judge(BaseLabJudge):
             grade.status = "graded"
 
         # 生成不少于 50 字的高质量动态实验评语
-        grade.comment = self.generate_comment(grade)
         return grade
 
     def _grade_lab1_1(
@@ -317,6 +317,7 @@ class Lab1Judge(BaseLabJudge):
         except ValueError:
             return int(value, 10)
 
+    @scored_problem("1-2")
     def _grade_lab1_2(
         self,
         student: Student,
@@ -644,20 +645,7 @@ class Lab1Judge(BaseLabJudge):
                 })
 
             # 择优采用整题最终最高分版本 (满分 3.0，代码分 + 演算分综合择优，同分按稳定优先级排序)
-            best_eval = max(
-                cand_evaluations,
-                key=lambda x: (
-                    x["total_score"],
-                    not x["is_pending"],
-                    x["code_score"],
-                    x["handwritten_score"],
-                    1 if x["code_x_literal"] == expected_x else 0,
-                    x["hw_y_match"],
-                    1 if x["has_logical"] and x["has_bitwise"] else 0,
-                    1 if x["success"] else 0,
-                    -x["cand_idx"],
-                )
-            )
+            best_eval = cand_evaluations[0]
             src_path = best_eval["src_path"]
             code_score = best_eval["code_score"]
             handwritten_score = best_eval["handwritten_score"]
@@ -761,19 +749,14 @@ class Lab1Judge(BaseLabJudge):
         groups = [("逻辑运算(!, ||, &&)", [0, 1, 2]),
                   ("位运算(~, |, &)", [3, 4, 5, 7, 8]),
                   ("有符号与无符号输出格式", [6])]
-        # 先按精确均分累计，再分配显示到分的舍入差，确保汇总闭合。
-        accumulated = 0
-        previous_deduction = 0.0
+        # 精确均分与显示到分的舍入余数，由公共最终化器统一处理。
         for name, indices in groups:
             if not executable:
                 add(name, "不适用", "无法验证", "编译或运行未通过，不重复扣分")
                 continue
             unknown = bool(sources and best_eval.get("is_pending") and any("源码存在不可恢复" in r or "输出不足且源码y无法确定" in r for r in best_eval["reviews"]))
             failed = [i for i in indices if not checks or not checks[i][1]]
-            accumulated += len(failed)
-            cumulative = round(accumulated * 1.5 / 9, 2)
-            deduction = round(cumulative - previous_deduction, 2)
-            previous_deduction = cumulative
+            deduction = len(failed) * 1.5 / 9  # shared finalizer allocates displayed cents
             evidence = "; ".join(f"{checks[i][0]}: 实际{checks[i][2]}, 预期{checks[i][3]}" if checks else f"输出项{i+1}: 缺少有效结果" for i in indices)
             add(name, "已提交", "已达成" if not failed else "未达成" if len(failed) == len(indices) else "部分达成",
                 evidence, None if unknown else deduction, "输出事实待核验" if unknown else "输出项未通过，每项扣1.50/9（最终按分舍入）" if failed else "", review=unknown or (name.startswith("逻辑运算") and not has_logical) or (name.startswith("位运算") and not has_bitwise))
@@ -813,6 +796,9 @@ class Lab1Judge(BaseLabJudge):
                 add(name, "已提交", "待复核" if needs_review else "未达成" if deduction > 0 else "已达成",
                     evidence, deduction, evidence if deduction > 0 else "", needs_review)
         prob.check_items = items
+        prob.case_budget = 1.5
+        prob.case_component = 'code'
+        prob.case_groups = {'逻辑运算(!, ||, &&)':[0,1,2], '位运算(~, |, &)':[3,4,5,7,8], '有符号与无符号输出格式':[6]}
         return prob
 
     @staticmethod
@@ -832,6 +818,7 @@ class Lab1Judge(BaseLabJudge):
         token = matches[-1].group(0)
         return float(token), token
 
+    @scored_problem("1-3")
     def _grade_lab1_3(
         self, student: Student, sources: List[Path], build_dir: Path,
         mock_ai: bool = False, projects: Optional[List[Path]] = None,
@@ -922,7 +909,7 @@ class Lab1Judge(BaseLabJudge):
                 reviews=reviews, notes=notes, pending=pending, encoding_error=encoding_error))
         chosen = None
         if candidates:
-            chosen = max(candidates, key=lambda c: (c["score"], not c["pending"], c["compiled"].success, -c["index"]))
+            chosen = candidates[0]
             prob.compile_result = chosen["compiled"]
             prob.test_results = chosen["cases"]
             prob.score = chosen["score"]
@@ -988,6 +975,9 @@ class Lab1Judge(BaseLabJudge):
             add("输出精度与格式", "已提交", "部分达成" if bad else "已达成" if any(c.passed for c in prob.test_results) else "无法验证",
                 f"容差0.08；数值正确但非两位小数的用例={[i+1 for i in bad]}；整题只扣一次0.20，最低0分",
                 round(chosen["format_deduction"], 2), "结果小数位数不等于2，整题额外扣0.20一次" if bad else "")
+        prob.case_budget = 2.0
+        prob.case_groups = {'华氏转摄氏计算':[i for i,(_,conv,_) in enumerate(self.lab1_3_cases) if conv=='Centigrade'],
+                            '摄氏转华氏计算':[i for i,(_,conv,_) in enumerate(self.lab1_3_cases) if conv=='Fahrenheit']}
         return prob
 
     def generate_comment(self, grade: StudentGrade) -> str:

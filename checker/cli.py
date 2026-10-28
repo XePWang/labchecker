@@ -181,7 +181,7 @@ def run_lab(
             detail_batch = output_dir / f"mock_{lab_name}结果.csv"
         if detail_batch.exists():
             print(f"[*] 检测到历史批次成绩文件，正在安全合并单人结果并更新全班成绩单...")
-            merged_grades = reporter.load_existing_grades_from_files(roster_mgr.students)
+            merged_grades = reporter.load_existing_grades_from_files(roster_mgr.students, mock_mode=mock_ai)
             merged_grades[target_student.student_id] = target_grade
             report_paths = reporter.generate_all_reports(
                 roster_students=roster_mgr.students,
