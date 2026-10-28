@@ -321,7 +321,8 @@ int main() {
             image_paths=[self.test_work / "non_existent.png"],
             mock_mode=False,
         )
-        self.assertEqual(res["suggested_score"], 0.0)
+        self.assertIsNone(res["suggested_score"])
+        self.assertTrue(res["is_pending"])
         self.assertIn("缺失", res["reasoning"])
 
     def test_08_reporter_outputs_and_roster_alignment(self):
@@ -852,9 +853,9 @@ int main() {
                 image_paths=[dummy_img],
                 mock_mode=False,
             )
-            # 必须判定身份矛盾并标记复核，得分清零
+            # 身份项0.50清零，其他已确认手写分保留，并标记复核
             self.assertTrue(res["needs_review"])
-            self.assertEqual(res["suggested_score"], 0.0)
+            self.assertEqual(res["suggested_score"], 1.0)
             self.assertIn("演草纸学生身份矛盾", res["review_reason"])
 
     def test_22_ai_regex_fallback_parsing(self):
@@ -1210,7 +1211,7 @@ int main() {
         )
         # 字迹不清/存疑必须保持复核，绝不能被误判为只有身份未注明而清除复核
         self.assertTrue(normalized["needs_review"])
-        self.assertEqual(normalized["derivation_score"], 0.4)
+        self.assertEqual(normalized["derivation_score"], 0.8) # 无明确错误证据不主观扣分，疑义保留待复核
 
     def test_31_detail_csv_review_flag_strictly_localized(self):
         """测试 31: 明细 CSV 中的复核标记必须严格限定于具体分项，不得扩散至全部 18 项"""

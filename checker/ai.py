@@ -150,6 +150,10 @@ class HandwrittenReviewer:
             "info_score": {"type": "number"},
             "xy_match_score": {"type": "number"},
             "derivation_score": {"type": "number"},
+            "clear_error_operators": {"type": "array", "items": {"type": "string", "enum": ["!", "||", "&&", "~", "|", "&"]}},
+            "error_evidence": {"type": "array", "items": {"type": "string"}},
+            "no_valid_derivation": {"type": "boolean"},
+            "derivation_uncertain": {"type": "boolean"},
             "suggested_score": {"type": "number"},
             "operators_found": {
                 "type": "array",
@@ -160,7 +164,8 @@ class HandwrittenReviewer:
             "review_reason": {"type": "string"}
         },
         "required": [
-            "task_id", "info_score", "xy_match_score", "derivation_score", "reasoning", "needs_review"
+            "task_id", "info_score", "xy_match_score", "derivation_score", "reasoning", "needs_review",
+            "clear_error_operators", "error_evidence", "no_valid_derivation", "derivation_uncertain"
         ]
     }
 
@@ -189,10 +194,10 @@ class HandwrittenReviewer:
         if not existing_images:
             return {
                 "task_id": cls.EXPECTED_TASK_ID,
-                "suggested_score": 0.0,
-                "is_pending": False,
+                "suggested_score": None,
+                "is_pending": True,
                 "reasoning": "演草纸验算照片文件缺失或不存在",
-                "needs_review": False,
+                "needs_review": True,
                 "review_reason": "图片材料缺失",
             }
 
@@ -200,7 +205,7 @@ class HandwrittenReviewer:
         if not valid_images:
             return {
                 "task_id": cls.EXPECTED_TASK_ID,
-                "suggested_score": 0.0,
+                "suggested_score": None,
                 "is_pending": True,
                 "reasoning": "提交的照片为占位图像或文件损坏 (< 100B)",
                 "needs_review": True,
@@ -229,8 +234,9 @@ class HandwrittenReviewer:
 
         # 缓存键计算：结合 student_id 与图片内容 MD5
         hasher = hashlib.md5()
+        hasher.update(b"lab1-20261028-full-credit-v1")
         hasher.update(str(student_id).encode("utf-8"))
-        for p in valid_images:
+        for p in sorted(valid_images):
             try:
                 hasher.update(p.read_bytes())
             except Exception:
@@ -259,14 +265,17 @@ class HandwrittenReviewer:
 姓名: {student_name}
 系统预期的 x (学号末两位): {expected_x}
 
-【评分标准 (满分 1.5 分草案)】
-1. 身份信息规范 (0.0~0.5分)：纸面上是否手写标明：姓名、学号、手机号。三者齐全得 0.5，缺项酌情扣分。
-2. 参数一致性核对 (0.0~0.2分)：检查参与验算的 x 是否等于学号末两位 ({expected_x})，y 是否为手机号末两位。
-3. 演算过程完整性 (0.0~0.8分)：必须对 !、||、&&、~、|、& 这 6 种操作符进行验算，重点检查位运算是否有二进制展开或竖式推导。
+【已确认评分标准（手写满分1.50）】
+1. 身份信息0.50：漏写、简写、手机号不完整均不扣分；姓名或学号明确与登记冲突时身份项为0，并标记复核。不得因此取消已确认的推导分。
+2. 材料参数部分0.20：有有效验算材料即按满分保留。明确的 x/y 不对应由程序在推导项各额外扣0.20，每个参数只扣一次。
+3. 推导部分0.80：手写结果与实际运算对应且没有明显错误，倾向给满。简写、未逐项列竖式、小笔误或表达不精细不酌情扣分。
+仅将有清晰证据的实质运算错误记入 clear_error_operators，error_evidence 逐条说明纸面内容、正确结果及错误原因。derivation_score 使用0～0.80的连续分值；无明确实质错误时给0.80，有明确错误才结合错误程度评分，不按书写细节酌情扣分。
+确无有效验算内容才将 no_valid_derivation 设为true。字迹无法辨认、结果无法确认则 derivation_uncertain=true 并说明，不把未知当错误。
+所有字段描述真实观察事实；程序在AI推导分基础上统一处理身份分和参数额外扣分。
 
 【严格校验与输出约定】
 task_id 必须为 "{cls.EXPECTED_TASK_ID}"。
-info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范围 0.0~0.8。
+info_score 范围0.0~0.5，xy_match_score 范围0.0~0.2，derivation_score 范围0.0~0.8；须同时填写明确错误和疑义事实字段。
 若字迹严重模糊、颠倒或无法辨认，将 needs_review 置为 true 并说明原因。
 输出必须符合指定的 JSON Schema。
 """
@@ -313,141 +322,109 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
 
     @classmethod
     def normalize_review_result(
-        cls,
-        res: Dict[str, Any],
-        student_id: str,
-        student_name: str,
-        expected_x: int,
-        deduced_y: Optional[int] = None,
+        cls, res: Dict[str, Any], student_id: str, student_name: str,
+        expected_x: int, deduced_y: Optional[int] = None, expected_phone: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """依据【目录优先、最大容错】原则，规范化演草纸视觉批改结果"""
+        """按确认事实重算：身份0.50，材料参数0.20，推导0.80；仅明确错误扣分。"""
         res = dict(res)
-        if res.get("is_pending"):
+        if res.get("is_pending") and not res.get("grading_policy_version"):
+            res["suggested_score"] = None
+            res["needs_review"] = True
             return res
 
-        obs_id = str(res.get("student_id_observed") or "").strip()
-        obs_name = str(res.get("name_observed") or "").strip()
-        expected_id = str(student_id).strip()
-        expected_name = str(student_name).strip()
+        def identity(value: Any, is_id: bool = False) -> str:
+            text = str(value or "").strip()
+            if not text or any(p in text.lower() for p in ["未", "无", "缺", "空", "none", "null", "n/a", "不详", "未知", "没有"]):
+                return ""
+            if is_id and not re.fullmatch(r"\d{8,}", text):
+                return ""
+            return text
 
-        # 过滤未写、占位符或无效信息
-        non_id_patterns = ["未", "无", "缺", "空", "none", "null", "n/a", "不详", "未知", "没有"]
-        def is_placeholder(v: str) -> bool:
-            s = v.strip().lower()
-            return not s or any(p in s for p in non_id_patterns)
+        def number(value: Any) -> Optional[int]:
+            if isinstance(value, bool) or value is None:
+                return None
+            try:
+                n = int(str(value).strip())
+                return n if 0 <= n <= 99 else None
+            except (ValueError, TypeError):
+                return None
 
-        if is_placeholder(obs_id) or not re.search(r"\d{4,}", obs_id):
-            obs_id = ""
-        if is_placeholder(obs_name):
-            obs_name = ""
-
+        obs_id = identity(res.get("student_id_observed"), True)
+        obs_name = identity(res.get("name_observed"))
         res["student_id_observed"] = obs_id
         res["name_observed"] = obs_name
+        conflicts = []
+        if obs_id and obs_id != str(student_id).strip():
+            conflicts.append(f"观察学号 {obs_id} 与预期学号 {student_id} 不符")
+        if obs_name and student_name and obs_name != str(student_name).strip():
+            conflicts.append(f"观察姓名 {obs_name} 与预期姓名 {student_name} 不符")
 
-        identity_conflict = False
-        conflict_details = []
+        hw_x, hw_y = number(res.get("x_observed")), number(res.get("y_observed"))
+        phone = identity(res.get("phone_observed"))
+        phone_digits = re.sub(r"\D", "", phone)
+        phone_y = int(phone_digits[-2:]) if len(phone_digits) >= 2 else None
+        registered_phone = re.sub(r"\D", "", str(expected_phone or ""))
+        registered_y = int(registered_phone[-2:]) if len(registered_phone) >= 2 else None
+        if len(phone_digits) >= 11 and len(registered_phone) >= 11 and phone_digits != registered_phone:
+            conflicts.append("纸面完整手机号与登记手机号明确不符")
+        compared_y = hw_y if hw_y is not None else phone_y
+        mismatches = []
+        details = []
+        if hw_x is not None and hw_x != expected_x:
+            mismatches.append("x")
+            details.append(f"参数矛盾: 手写 x={hw_x} 与学号末两位 {expected_x} 不符")
+        if ((hw_y is not None and phone_y is not None and hw_y != phone_y)
+                or (compared_y is not None and deduced_y is not None and compared_y != deduced_y)
+                or (compared_y is not None and registered_y is not None and compared_y != registered_y)):
+            mismatches.append("y")
+            details.append(f"参数矛盾: 手写 y={hw_y}, 手机号末两位={phone_y}, 代码已验证 y={deduced_y}, 登记手机号末两位={registered_y}")
 
-        if obs_id and obs_id != expected_id:
-            identity_conflict = True
-            conflict_details.append(f"观察学号 {obs_id} 与预期学号 {expected_id} 不符")
+        # 有明确错误证据时采用AI连续推导分；简写和小笔误不酌情扣分。
+        allowed = {"!", "||", "&&", "~", "|", "&"}
+        evidence = res.get("error_evidence") or []
+        errors = sorted(set(res.get("clear_error_operators") or []) & allowed) if evidence else []
+        no_valid = res.get("no_valid_derivation") is True
+        raw_derivation = res.get("observed_derivation_score", res.get("derivation_score", 0.8))
+        res["observed_derivation_score"] = raw_derivation
+        base_derivation = 0.0 if no_valid else max(0.0, min(0.8, float(raw_derivation))) if errors else 0.8
+        base_derivation = round(base_derivation, 2)
+        error_deduction = round(0.8 - base_derivation, 2)
+        parameter_penalty = 0.2 * len(mismatches)
+        derivation = max(0.0, round(base_derivation - parameter_penalty, 2))
 
-        if obs_name and expected_name and obs_name != expected_name:
-            identity_conflict = True
-            conflict_details.append(f"观察姓名 {obs_name} 与预期姓名 {expected_name} 不符")
+        original_reason = str(res.get("observation_review_reason", res.get("review_reason", "")))
+        original_review = bool(res.get("observation_needs_review", res.get("needs_review")))
+        res["observation_review_reason"] = original_reason
+        res["observation_needs_review"] = original_review
+        uncertainty_words = ["字迹不清", "模糊", "无法辨认", "无法辨识", "辨识不清", "推导过程存疑", "运算过程存疑"]
+        uncertain = bool(res.get("derivation_uncertain")) or any(w in original_reason for w in uncertainty_words)
+        missing_words = ["未书写", "未标明", "未见学生姓名", "纸面上未", "纸面未", "缺失手写", "未写明", "未填写", "缺失姓名", "缺失个人", "无法直接从", "无法独立凭", "旋转", "横向拍摄", "电子文字叠加", "未注明", "身份信息", "无法核实归属", "无法确认学生身份"]
+        only_missing_info = any(w in original_reason for w in missing_words) and not uncertain
+        reasons = []
+        if conflicts:
+            reasons.append("演草纸学生身份矛盾: " + "; ".join(conflicts))
+        reasons.extend(details)
+        if uncertain:
+            reasons.append(original_reason or "手写推导无法可靠辨认")
+        elif original_review and not only_missing_info and original_reason:
+            reasons.append(original_reason)
 
-        raw_info = float(res.get("info_score", 0.0))
-        raw_xy = float(res.get("xy_match_score", 0.0))
-        raw_deriv = float(res.get("derivation_score", 0.0))
-
-        # 恢复由于旧代码将未填写误判为身份矛盾而被清零的演算得分
-        if not identity_conflict and raw_xy == 0.0 and raw_deriv == 0.0:
-            reasoning = str(res.get("reasoning", ""))
-            if "综合得分 1.0" in reasoning or "建议得分：1.0" in reasoning:
-                raw_info = 0.0
-                raw_xy = 0.2
-                raw_deriv = 0.8
-            elif "总得分建议 0.75" in reasoning:
-                raw_info = 0.0
-                raw_xy = 0.1
-                raw_deriv = 0.65
-
-        if identity_conflict:
-            res["needs_review"] = True
-            err_msg = f"演草纸学生身份矛盾: {'; '.join(conflict_details)}"
-            res["review_reason"] = err_msg
-            raw_info = 0.0
-            raw_xy = 0.0
-            raw_deriv = 0.0
-            info_score = 0.0
-            xy_match_score = 0.0
-            derivation_score = 0.0
-        else:
-            # 大一宽容政策：没有手写清楚信息不扣分（按0.50计），需与源码及提交目录对照检查
-            info_score = 0.5
-            res["info_score_raw"] = max(0.0, min(0.5, raw_info))
-
-            # 参数 x 检查与推导一致性核对
-            hw_x = res.get("x_observed")
-            hw_y = res.get("y_observed")
-            hw_phone = res.get("phone_observed")
-            if hw_y is None and hw_phone:
-                ph_digits = re.findall(r"\d+", str(hw_phone))
-                if ph_digits and len(ph_digits[-1]) >= 2:
-                    try:
-                        hw_y = int(ph_digits[-1][-2:])
-                    except ValueError:
-                        pass
-
-            param_x_conflict = (hw_x is not None and hw_x != expected_x)
-            param_y_conflict = (hw_y is not None and deduced_y is not None and hw_y != deduced_y)
-
-            if param_x_conflict or param_y_conflict:
-                xy_match_score = 0.0
-                res["needs_review"] = True
-                conflict_reasons = []
-                if param_x_conflict:
-                    conflict_reasons.append(f"参数 x 矛盾: 观察到 x={hw_x} 与预期 x={expected_x} 不符")
-                if param_y_conflict:
-                    conflict_reasons.append(f"参数 y 矛盾: 观察到 y={hw_y} 与代码推导 y={deduced_y} 不符")
-                res["review_reason"] = "; ".join(conflict_reasons)
-            else:
-                if hw_x == expected_x:
-                    xy_match_score = 0.2
-                else:
-                    xy_match_score = max(0.0, min(0.2, raw_xy))
-
-            derivation_score = max(0.0, min(0.8, raw_deriv))
-
-            # 区分【推导计算疑义】与【纯身份信息未写】：字迹不清/推导存疑绝不能被宽容规则自动清除
-            rr = str(res.get("review_reason", ""))
-            calc_doubt_keywords = [
-                "字迹不清", "模糊", "无法辨认", "难以辨认", "字迹潦草", "无法辨识", "辨识不清",
-                "计算错误", "推导有误", "缺少展开", "步骤缺失", "演算错误", "运算错误",
-                "逻辑错误", "结果错误", "步骤不全", "推导不完整", "缺少推导", "过程缺失",
-                "运算不符", "演算不符", "推导过程存疑",
-            ]
-            has_calc_doubt = any(k in rr for k in calc_doubt_keywords)
-
-            if has_calc_doubt:
-                res["needs_review"] = True
-            elif not param_x_conflict and not param_y_conflict:
-                only_missing_info = any(k in rr for k in [
-                    "未书写", "未标明", "未见学生姓名", "纸面上未", "纸面未",
-                    "缺失手写", "未写明", "未填写", "缺失姓名", "缺失个人",
-                    "无法直接从", "无法独立凭", "旋转", "横向拍摄", "电子文字叠加",
-                    "未注明", "无法验证身份及 y 的来源", "演草纸学生身份矛盾",
-                    "无法核实归属", "无法确认学生身份", "身份信息",
-                ])
-                if only_missing_info:
-                    res["needs_review"] = False
-                    res["review_reason"] = ""
-
-        computed_score = round(info_score + xy_match_score + derivation_score, 2)
-        res["info_score"] = info_score
-        res["xy_match_score"] = xy_match_score
-        res["derivation_score"] = derivation_score
-        res["suggested_score"] = min(1.5, computed_score)
-        res["is_pending"] = False
+        res.update(
+            info_score=0.0 if conflicts else 0.5,
+            xy_match_score=0.2,
+            derivation_score=derivation,
+            derivation_base_score=round(base_derivation, 2),
+            derivation_error_deduction=round(error_deduction, 2),
+            parameter_penalty=round(parameter_penalty, 2),
+            parameter_mismatches=mismatches,
+            clear_error_operators=errors,
+            identity_conflict=bool(conflicts),
+            needs_review=bool(reasons),
+            review_reason="; ".join(dict.fromkeys(reasons)),
+            is_pending=uncertain,
+            grading_policy_version="lab1-20261028-full-credit-v1",
+        )
+        res["suggested_score"] = None if uncertain else round(res["info_score"] + 0.2 + derivation, 2)
         return res
 
     @classmethod
@@ -543,9 +520,10 @@ info_score 范围 0.0~0.5，xy_match_score 范围 0.0~0.2，derivation_score 范
             if not imgs:
                 continue
             hasher = hashlib.md5()
+            hasher.update(b"lab1-20261028-full-credit-v1")
             hasher.update(str(sid).encode("utf-8"))
             for p in sorted(imgs):
-                if p.exists():
+                if p.exists() and p.stat().st_size > 100:
                     hasher.update(p.read_bytes())
             cache_key = f"review_{hasher.hexdigest()}"
             if cache_key not in cache or cache[cache_key].get("is_pending"):
@@ -669,9 +647,12 @@ EXPECTED>>>
 {actual_output[:1000]}
 ACTUAL_OUTPUT>>>
 
+【C/C++语言语义核验要求】
+必须结合源码声明的实际类型、整型提升、通常算术转换、显式强制转换及运算顺序判断。出现整数常量不等于发生整数除法；例如 temp 是浮点型时，5*(temp-32)/9 使用浮点运算，而 (5/9)*(temp-32) 的括号内才先做整除。结论须与本次输入的实际运行结果相符，不能仅因菜单出现0或源码含整数就认定截断。
+
 【学生核心源码】
 <<<SOURCE_CODE
-{source_code[:1500]}
+{source_code}
 SOURCE_CODE>>>
 
 【本题满分】

@@ -308,6 +308,15 @@ class Lab1Judge(BaseLabJudge):
 
         return best_c, best_y, best_checks
 
+    @staticmethod
+    def _c_integer_literal(value: str) -> int:
+        unsigned = value.lstrip("-")
+        base = 16 if unsigned.lower().startswith("0x") else 8 if len(unsigned) > 1 and unsigned.startswith("0") else 10
+        try:
+            return int(value, base)
+        except ValueError:
+            return int(value, 10)
+
     def _grade_lab1_2(
         self,
         student: Student,
@@ -359,10 +368,15 @@ class Lab1Judge(BaseLabJudge):
             mock_mode=mock_ai,
         )
 
+        if images:
+            ai_res_base = HandwrittenReviewer.normalize_review_result(
+                ai_res_base, student.student_id, student.name, expected_x, expected_phone=student.phone)
+
         if not sources:
             if corrupt_archives:
                 prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
                 prob.needs_review = True
+                prob.is_pending = True
                 prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 1-2 源码及演算无法验证")
             elif projects:
                 prob.notes.append("未找到 Lab 1-2 源码 (仅提交 Code::Blocks 工程文件 .cbp，缺少 .c 源码)")
@@ -400,12 +414,12 @@ class Lab1Judge(BaseLabJudge):
             if hw_sid and hw_sid != str(student.student_id).strip():
                 prob.needs_review = True
                 prob.review_reasons.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
-                handwritten_score = 0.0
+                # 身份冲突只取消信息0.50分，推导保留。
 
             if hw_name and hw_name != str(student.name).strip():
                 prob.needs_review = True
                 prob.review_reasons.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
-                handwritten_score = min(handwritten_score, 0.8)
+                # 归属疑义按身份项复核，不清零推导。
 
             hw_x = ai_res.get("x_observed")
             if hw_x is not None and hw_x != expected_x:
@@ -432,12 +446,14 @@ class Lab1Judge(BaseLabJudge):
                     c_text = ""
                     c_encoding_error = f"UTF-8 解码失败: {e}"
 
-                c_has_log = all(op in c_text for op in ["!", "||", "&&"])
-                c_has_bit = all(op in c_text for op in ["~", "|", "&"])
-                m_x = re.search(r'\bx\s*=\s*(-?\d+)', c_text)
-                m_y = re.search(r'\by\s*=\s*(-?\d+)', c_text)
-                c_code_x = int(m_x.group(1)) if m_x else None
-                c_code_y = int(m_y.group(1)) if m_y else None
+                clean_text = re.sub(r'/\*.*?\*/|//[^\n]*', '', c_text, flags=re.S)
+                operator_text = re.sub(r'"(?:\\.|[^"\\])*"', '', clean_text)
+                c_has_log = all(op in operator_text for op in ["!", "||", "&&"])
+                c_has_bit = all(op in operator_text for op in ["~", "|", "&"])
+                m_x = re.search(r'\bx\s*=\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))', clean_text)
+                m_y = re.search(r'\by\s*=\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))', clean_text)
+                c_code_x = self._c_integer_literal(m_x.group(1)) if m_x else None
+                c_code_y = self._c_integer_literal(m_y.group(1)) if m_y else None
 
                 if precompiled and (student.student_id, "1-2", cand_idx) in precompiled:
                     c_compile = precompiled[(student.student_id, "1-2", cand_idx)]
@@ -446,15 +462,17 @@ class Lab1Judge(BaseLabJudge):
                 c_notes = []
                 c_reviews = []
                 c_needs_review = False
+                c_code_pending = False
                 c_score = 0.0
                 c_exec = None
                 c_checks = []
-                c_deduced_y = 0
+                c_deduced_y = None
                 c_v_list = [0] * 9
 
                 if c_encoding_error:
                     c_notes.append(f"源码编码损坏: {c_encoding_error}")
                     c_needs_review = True
+                    c_code_pending = True
                     c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
                 elif sf and sf.encoding_converted:
                     c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
@@ -504,7 +522,7 @@ class Lab1Judge(BaseLabJudge):
                                     c_score = 1.5
                                     c_notes.append(f"代码逻辑与位运算 9 项校验完全正确 (x={expected_x}, 推导y={c_deduced_y})")
                                 else:
-                                    c_score = 0.75
+                                    c_score = 1.5
                                     c_notes.append("9项运算输出正确，但源码缺少运算符，疑似直接打印常数")
                                     c_needs_review = True
                                     c_reviews.append("1-2 源码运算符静态检查未通过")
@@ -512,8 +530,27 @@ class Lab1Judge(BaseLabJudge):
                                 c_score = round(1.5 * (passed_terms / 9.0), 2)
                                 c_notes.append(f"代码运算有 {len(failed_terms)} 项不符预期: {', '.join(failed_terms)} (通过 {passed_terms}/9)")
                         else:
-                            c_notes.append(f"代码输出数字不足 9 个 (实际输出 {len(all_numbers)} 个)")
-                            c_score = 0.2
+                            c_notes.append(f"代码输出数字不足9个（实际{len(all_numbers)}个）；已输出项逐项计分，缺失项不通过")
+                            partial_y = c_code_y
+                            if partial_y is None and len(all_numbers) >= 6:
+                                inferred = all_numbers[4] + all_numbers[5] - expected_x
+                                partial_y = inferred if 0 <= inferred <= 99 else None
+                            c_deduced_y = partial_y
+                            y = partial_y if partial_y is not None else 0
+                            expected = [int(not expected_x), int(bool(expected_x or y)), int(bool(expected_x and y)),
+                                        (~expected_x) & 0xffff, expected_x | y, expected_x & y,
+                                        ~expected_x, expected_x | y, expected_x & y]
+                            names = ["!x", "x||y", "x&&y", "~x(unsigned)", "x|y(line2)", "x&y(line2)",
+                                     "~x(signed)", "x|y(line3)", "x&y(line3)"]
+                            c_checks = [(name, i < len(all_numbers) and all_numbers[i] == expected[i] and
+                                         (partial_y is not None or i in (0, 3, 6)),
+                                         all_numbers[i] if i < len(all_numbers) else None, expected[i])
+                                        for i, name in enumerate(names)]
+                            c_score = round(sum(ok for _, ok, _, _ in c_checks) * 1.5 / 9, 2)
+                            if partial_y is None and all_numbers:
+                                c_needs_review = True
+                                c_code_pending = True
+                                c_reviews.append("输出不足且源码y无法确定，依赖y的输出待复核")
 
                 if images:
                     c_ai_res = HandwrittenReviewer.normalize_review_result(
@@ -522,6 +559,7 @@ class Lab1Judge(BaseLabJudge):
                         student_name=student.name,
                         expected_x=expected_x,
                         deduced_y=c_deduced_y,
+                        expected_phone=student.phone,
                     )
                     c_hw_score = 0.0
                     if c_ai_res.get("suggested_score") is not None:
@@ -541,12 +579,12 @@ class Lab1Judge(BaseLabJudge):
                     if hw_sid and hw_sid != str(student.student_id).strip():
                         c_hw_needs_review = True
                         c_hw_reviews.append(f"演草纸手写学号 ({hw_sid}) 与系统学号 ({student.student_id}) 不符")
-                        c_hw_score = 0.0
+                        # 信息项已在规范化中处理，不重复取消推导分。
 
                     if hw_name and hw_name != str(student.name).strip():
                         c_hw_needs_review = True
                         c_hw_reviews.append(f"演草纸手写姓名 ({hw_name}) 与系统姓名 ({student.name}) 不符")
-                        c_hw_score = min(c_hw_score, 0.8)
+                        # 姓名冲突只影响信息项。
 
                     hw_x = c_ai_res.get("x_observed")
                     hw_y = c_ai_res.get("y_observed")
@@ -566,8 +604,7 @@ class Lab1Judge(BaseLabJudge):
                     if hw_y is not None and c_deduced_y is not None and hw_y != c_deduced_y:
                         c_hw_needs_review = True
                         c_hw_reviews.append(f"参数矛盾: 代码 y={c_deduced_y} 与演草纸手写 y={hw_y} 不一致")
-                        if c_hw_score > 0:
-                            c_hw_score = max(0.0, round(c_hw_score - 0.2, 2))
+                        # 参数罚分已由 normalize_review_result 统一计算，仅扣一次。
 
                     if c_ai_res.get("needs_review") and c_ai_res.get("review_reason"):
                         c_hw_reviews.append(f"演草纸复核: {c_ai_res.get('review_reason')}")
@@ -601,7 +638,7 @@ class Lab1Judge(BaseLabJudge):
                     "notes": c_notes,
                     "reviews": c_reviews + c_hw_reviews,
                     "needs_review": c_needs_review or c_hw_needs_review,
-                    "is_pending": c_hw_is_pending,
+                    "is_pending": c_hw_is_pending or c_code_pending,
                     "ai_res": c_ai_res,
                     "success": c_compile.success,
                 })
@@ -611,6 +648,7 @@ class Lab1Judge(BaseLabJudge):
                 cand_evaluations,
                 key=lambda x: (
                     x["total_score"],
+                    not x["is_pending"],
                     x["code_score"],
                     x["handwritten_score"],
                     1 if x["code_x_literal"] == expected_x else 0,
@@ -682,1286 +720,299 @@ class Lab1Judge(BaseLabJudge):
         prob.score = round(code_score + handwritten_score, 2)
         if prob.is_pending:
             prob.status = "needs_review"
-        elif prob.score >= 2.8:
+        elif prob.score == prob.max_score:
             prob.status = "passed"
         elif prob.score > 0:
             prob.status = "partial"
         else:
             prob.status = "failed"
 
-        # --- C. 构建结构化检查分项 (CheckItems: 6 个代码项 + 5 个手写验算项) ---
+        # 每个实际输出项均分；检查分类只汇总对应用例，不重复计扣。
         items: List[CheckItem] = []
+        def add(name, submitted, completed, evidence, deduction=0.0, reason="", review=False):
+            items.append(CheckItem("1-2", name, submitted, completed, evidence,
+                                   deduction, reason, reason, review))
 
-        # 1. 源码提交
-        if sources:
-            src_sf = next((f for f in all_files if f.path == src_path), None)
-            enc_note = f" (已自 {src_sf.source_encoding} 规范化为 UTF-8)" if (src_sf and src_sf.encoding_converted) else ""
-            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
-            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {src_sf.source_encoding})" if (src_sf and src_sf.encoding_converted) else "源码文件归档正常")
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=ev_str,
-                deduction=0.0,
-                deduction_reason="",
-                agent_note=an_str,
-                needs_review=False,
-            ))
-        elif corrupt_archives:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="已提交",
-                completion_status="无法验证",
-                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败: {corrupt_archives[0].note or '解压异常'}",
-                deduction=1.50,
-                deduction_reason="提交压缩包损坏解压失败，Lab 1-2 源码无法验证，待人工复核",
-                agent_note="解压失败、内容无法验证、待复核",
-                needs_review=True,
-            ))
-        elif projects:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="无法归属",
-                completion_status="未达成",
-                evidence=f"归档项目文件: {', '.join(p.name for p in projects)}",
-                deduction=1.50,
-                deduction_reason="仅提交 Code::Blocks 工程描述文件 (.cbp)，缺少实际可编译 C 源码",
-                agent_note="仅提交工程描述文件，缺少源码，待现场人工确认",
-                needs_review=True,
-            ))
-        elif links:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="无法归属",
-                completion_status="未达成",
-                evidence=f"归档快捷方式: {', '.join(l.name for l in links)}",
-                deduction=1.50,
-                deduction_reason="提交内容为 Windows 快捷方式 (.lnk)，缺实际源文件",
-                agent_note="提交内容为快捷方式，缺少源码，待现场人工确认",
-                needs_review=True,
-            ))
-        elif has_exe:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="无法归属",
-                completion_status="未达成",
-                evidence="归档中发现预编译可执行文件但无 .c 源码",
-                deduction=1.50,
-                deduction_reason="仅提交预编译 exe 文件，缺少 C 源码（沙箱环境禁止执行外部预编译二进制）",
-                agent_note="仅提交预编译二进制，按沙箱规范禁止执行，待补交复核",
-                needs_review=True,
-            ))
-        else:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="源码提交",
-                submission_status="未提交",
-                completion_status="未达成",
-                evidence="学生目录未找到 Lab 1-2 源码",
-                deduction=1.50,
-                deduction_reason="未提交 Lab 1-2 源码文件",
-                agent_note="未提交代码",
-                needs_review=False,
-            ))
-
-        # 2. 编译与运行
+        special = bool(corrupt_archives or projects or links or has_exe)
+        missing_reason = ("提交压缩包损坏解压失败，内容无法验证" if corrupt_archives else
+                          "仅提交 .cbp 工程文件，缺少 C 源码" if projects else
+                          "提交内容为 .lnk 快捷方式，缺实际源码" if links else
+                          "仅提交预编译 exe，缺少 C 源码" if has_exe else "未提交 Lab 1-2 源码")
+        add("源码提交", "已提交" if sources or corrupt_archives else "无法归属" if special else "未提交",
+            "已达成" if sources else "无法验证" if corrupt_archives else "未达成",
+            f"采用源码: {src_path}; 候选数={len(sources)}" if sources else missing_reason,
+            0.0 if sources else None if corrupt_archives else 1.5,
+            "" if sources else missing_reason, special and not sources)
+        if corrupt_archives and not sources:
+            items[-1].agent_note = "解压失败、内容无法验证、待复核"
+        executable = bool(c_res and c_res.success and exec_res and not exec_res.timed_out and exec_res.exit_code == 0)
         if not sources:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="编译与运行",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交源码文件",
-                deduction=0.0,
-                deduction_reason="缺少源码，本项无法验证，不重复扣分（已在源码提交项计扣）",
-                agent_note="无源码无法编译",
-                needs_review=False,
-            ))
-        elif c_res and not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence=f"GCC 诊断: {c_res.stderr[:160]}",
-                deduction=1.50,
-                deduction_reason="GCC 编译失败，无法生成二进制执行文件",
-                agent_note="代码编译失败",
-                needs_review=False,
-            ))
-        elif exec_res and exec_res.timed_out:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence="执行超过 2.0s 被 SIGKILL 强杀",
-                deduction=1.50,
-                deduction_reason="程序运行超时，疑似死循环",
-                agent_note="运行超时",
-                needs_review=False,
-            ))
-        elif exec_res and exec_res.exit_code != 0:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence=f"退出码 {exec_res.exit_code}, stderr: {exec_res.stderr[:80]}",
-                deduction=1.50,
-                deduction_reason=f"程序运行时崩溃 (exit {exec_res.exit_code})",
-                agent_note="运行时崩溃",
-                needs_review=False,
-            ))
+            add("编译与运行", "不适用", "无法验证", "缺少源码，已在源码提交项记录")
+        elif not executable:
+            evidence = c_res.stderr[:200] if c_res and not c_res.success else "程序运行超时或异常退出"
+            add("编译与运行", "已提交", "未达成", evidence, 1.5, "源码无法正常编译运行，九个输出项均无法通过")
         else:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=f"GCC 编译成功 ({c_res.duration_ms:.1f}ms)，沙箱运行退出码 0" if c_res else "编译运行正常",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="编译通过并正常退出",
-                needs_review=False,
-            ))
+            add("编译与运行", "已提交", "已达成", f"GCC编译成功，运行退出码0；九个输出项各占1.50/9")
+        x_mismatch = code_x_literal is not None and code_x_literal != expected_x
+        add("参数学号与手机号对齐", "已提交" if sources else "不适用",
+            "无法验证" if not executable else "部分达成" if x_mismatch else "已达成",
+            f"源码字面 x={code_x_literal}; 学号末两位={expected_x}; 已验证代码y={deduced_y}。参数影响按输出用例计分，不额外重复扣代码分。",
+            review=bool(executable and x_mismatch))
+        groups = [("逻辑运算(!, ||, &&)", [0, 1, 2]),
+                  ("位运算(~, |, &)", [3, 4, 5, 7, 8]),
+                  ("有符号与无符号输出格式", [6])]
+        # 先按精确均分累计，再分配显示到分的舍入差，确保汇总闭合。
+        accumulated = 0
+        previous_deduction = 0.0
+        for name, indices in groups:
+            if not executable:
+                add(name, "不适用", "无法验证", "编译或运行未通过，不重复扣分")
+                continue
+            unknown = bool(sources and best_eval.get("is_pending") and any("源码存在不可恢复" in r or "输出不足且源码y无法确定" in r for r in best_eval["reviews"]))
+            failed = [i for i in indices if not checks or not checks[i][1]]
+            accumulated += len(failed)
+            cumulative = round(accumulated * 1.5 / 9, 2)
+            deduction = round(cumulative - previous_deduction, 2)
+            previous_deduction = cumulative
+            evidence = "; ".join(f"{checks[i][0]}: 实际{checks[i][2]}, 预期{checks[i][3]}" if checks else f"输出项{i+1}: 缺少有效结果" for i in indices)
+            add(name, "已提交", "已达成" if not failed else "未达成" if len(failed) == len(indices) else "部分达成",
+                evidence, None if unknown else deduction, "输出事实待核验" if unknown else "输出项未通过，每项扣1.50/9（最终按分舍入）" if failed else "", review=unknown or (name.startswith("逻辑运算") and not has_logical) or (name.startswith("位运算") and not has_bitwise))
+        prob.test_results = [TestCaseResult(
+            case_id=f"term_{i+1}", input_data=f"x={expected_x},y={deduced_y}",
+            expected_output=str(checks[i][3]) if checks else "指导书第%d项运算结果" % (i+1),
+            actual_output=str(checks[i][2]) if checks else "", passed=bool(checks and checks[i][1]),
+            score=1.5/9 if checks and checks[i][1] else 0.0, max_score=1.5/9,
+        ) for i in range(9)] if executable else []
 
-        # 3. 参数学号与手机号对齐
-        if not sources or not c_res or not c_res.success or (exec_res and exec_res.exit_code != 0):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="参数学号与手机号对齐",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功编译运行，无运算输出",
-                deduction=0.0,
-                deduction_reason="编译或运行未通过，参数无法验证",
-                agent_note="无法提取参数",
-                needs_review=False,
-            ))
-        elif code_x_literal is not None and code_x_literal != expected_x:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="参数学号与手机号对齐",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence=f"源码字面 x={code_x_literal}，而学号末两位预期为 {expected_x}",
-                deduction=0.20,
-                deduction_reason=f"源码中 x 赋值 ({code_x_literal}) 未对齐学号后两位 ({expected_x})",
-                agent_note="参数未对齐学号后两位，需复核",
-                needs_review=True,
-            ))
-        else:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="参数学号与手机号对齐",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=f"源码 x={expected_x} 对齐学号后两位，运算推导参数 y={deduced_y}",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="参数符合学号要求",
-                needs_review=False,
-            ))
-
-        # 4. 逻辑运算(!, ||, &&)
-        if not sources or not c_res or not c_res.success or (exec_res and exec_res.exit_code != 0) or not checks:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="逻辑运算(!, ||, &&)",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功运行输出",
-                deduction=0.0,
-                deduction_reason="代码未正常运行，逻辑运算无法验证",
-                agent_note="逻辑运算无法验证",
-                needs_review=False,
-            ))
-        else:
-            logic_checks = checks[:3]
-            passed_log = sum(1 for _, ok, _, _ in logic_checks if ok)
-            failed_log = [name for name, ok, _, _ in logic_checks if not ok]
-            if passed_log == 3 and has_logical:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="逻辑运算(!, ||, &&)",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"3项逻辑运算输出均正确 (!x={v1}, x||y={v2}, x&&y={v3}) 且源码包含逻辑运算符",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="逻辑运算全部正确",
-                    needs_review=False,
-                ))
-            elif passed_log == 3 and not has_logical:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="逻辑运算(!, ||, &&)",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence="输出真值正确，但源码静态检查未检测到逻辑运算符 (!, ||, &&)",
-                    deduction=0.25,
-                    deduction_reason="输出真值正确，但源码缺少逻辑运算符，疑似常数欺骗",
-                    agent_note="缺少逻辑运算符，待复核",
-                    needs_review=True,
-                ))
+        add("验算材料提交", "已提交" if images or corrupt_archives else "未提交",
+            "已达成" if images else "待复核" if corrupt_archives else "未达成",
+            ", ".join(str(p) for p in images) if images else "验算材料无法取得" if corrupt_archives else "未提交手写验算照片",
+            0.0 if images else None if corrupt_archives else 1.5,
+            "" if images else "材料无法验证" if corrupt_archives else "未提交手写验算照片", bool(corrupt_archives and not images))
+        hw_pending = bool(ai_res.get("is_pending"))
+        identity_conflict = bool(ai_res.get("identity_conflict"))
+        no_valid = bool(ai_res.get("no_valid_derivation"))
+        mismatches = ai_res.get("parameter_mismatches", [])
+        base_derivation = float(ai_res.get("derivation_base_score", 0.8))
+        error_deduction = round(0.8 - base_derivation, 2)
+        parameter_deduction = round(base_derivation - float(ai_res.get("derivation_score", base_derivation)), 2)
+        for name, deduction, evidence, needs_review in [
+            ("姓名、学号、手机号完整性", 0.5 if identity_conflict else 0.0,
+             ai_res.get("review_reason", "") if identity_conflict else "按已确认政策：信息漏写不扣分；保留纸面观察事实，不将免扣写成信息齐全", identity_conflict),
+            ("手写参数与身份及源码一致性", parameter_deduction,
+             f"明确不符参数={mismatches}; x观察={ai_res.get('x_observed')}; y观察={ai_res.get('y_observed')}; 已验证代码y={deduced_y}。每个参数额外扣0.20，只在推导预算内扣一次。", bool(mismatches)),
+            ("六种运算展开过程完整性", error_deduction,
+             f"明确错误运算={ai_res.get('clear_error_operators', [])}; 证据={ai_res.get('error_evidence', [])}; 无有效推导={no_valid}。简写、少竖式和小笔误免扣，仅有明确错误时使用AI连续推导分d，扣0.80−d。", False),
+            ("各验算过程与结果正确性", 0.0, ai_res.get("review_reason") or "按手写观察核对，明确运算错误已在推导项计扣", False),
+        ]:
+            if not images:
+                add(name, "不适用", "无法验证", "无手写材料，不重复扣分")
+            elif hw_pending:
+                add(name, "已提交", "待复核", ai_res.get("reasoning", "手写材料待核验"), None, "手写事实待复核", True)
             else:
-                comp_st = "部分达成" if passed_log > 0 else "未达成"
-                ded = round((3 - passed_log) * (1.5 / 9.0), 2)
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="逻辑运算(!, ||, &&)",
-                    submission_status="已提交",
-                    completion_status=comp_st,
-                    evidence=f"逻辑运算通过 {passed_log}/3 项，未达成项: {', '.join(failed_log)}",
-                    deduction=ded,
-                    deduction_reason=f"逻辑运算输出不符合预期真值 ({', '.join(failed_log)})",
-                    agent_note=f"逻辑运算未完全通过 ({passed_log}/3)",
-                    needs_review=False,
-                ))
-
-        # 5. 位运算(~, |, &)
-        if not sources or not c_res or not c_res.success or (exec_res and exec_res.exit_code != 0) or not checks:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="位运算(~, |, &)",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功运行输出",
-                deduction=0.0,
-                deduction_reason="代码未正常运行，位运算无法验证",
-                agent_note="位运算无法验证",
-                needs_review=False,
-            ))
-        else:
-            bw_checks = [checks[3], checks[4], checks[5], checks[7], checks[8]]
-            passed_bw = sum(1 for _, ok, _, _ in bw_checks if ok)
-            failed_bw = [name for name, ok, _, _ in bw_checks if not ok]
-            if passed_bw == 5 and has_bitwise:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="位运算(~, |, &)",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"位运算输出均与理论计算一致 (x={expected_x}, y={deduced_y})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="位运算全部正确",
-                    needs_review=False,
-                ))
-            elif passed_bw == 5 and not has_bitwise:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="位运算(~, |, &)",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence="位运算输出正确，但源码未包含位运算符 (~, |, &)",
-                    deduction=0.40,
-                    deduction_reason="位运算输出正确但源码缺少位运算符，疑似常数欺骗",
-                    agent_note="缺少位运算符，待复核",
-                    needs_review=True,
-                ))
-            else:
-                comp_st = "部分达成" if passed_bw > 0 else "未达成"
-                ded = round((5 - passed_bw) * (1.5 / 9.0), 2)
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="位运算(~, |, &)",
-                    submission_status="已提交",
-                    completion_status=comp_st,
-                    evidence=f"位运算通过 {passed_bw}/5 项，不符项: {', '.join(failed_bw)}",
-                    deduction=ded,
-                    deduction_reason=f"位运算输出存在偏差 ({', '.join(failed_bw)})",
-                    agent_note=f"位运算未全通过 ({passed_bw}/5)",
-                    needs_review=False,
-                ))
-
-        # 6. 有符号与无符号输出格式
-        if not sources or not c_res or not c_res.success or (exec_res and exec_res.exit_code != 0) or not checks:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="有符号与无符号输出格式",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功运行输出",
-                deduction=0.0,
-                deduction_reason="代码未正常运行，输出格式无法验证",
-                agent_note="格式无法验证",
-                needs_review=False,
-            ))
-        else:
-            ok_v4 = (v4 == exp_v4)
-            ok_v7 = (v7 == exp_v7)
-            if ok_v4 and ok_v7:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="有符号与无符号输出格式",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"第2行无符号 ~x={v4} (%5hu) 与第3行有符号 ~x={v7} (%5hd) 格式与数值均正确",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="格式符合要求",
-                    needs_review=False,
-                ))
-            else:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="有符号与无符号输出格式",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence=f"实际输出: 第2行无符号={v4} (预期{exp_v4}), 第3行有符号={v7} (预期{exp_v7})",
-                    deduction=0.17,
-                    deduction_reason="未正确区分有符号 short (%5hd) 与无符号 unsigned short (%5hu) 格式要求",
-                    agent_note="符号格式不符",
-                    needs_review=False,
-                ))
-
-        # 7. 验算材料提交
-        if images:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="验算材料提交",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=f"归档手写验算照片: {', '.join(p.name for p in images)}",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="手写材料已提交",
-                needs_review=False,
-            ))
-        elif corrupt_archives:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="验算材料提交",
-                submission_status="已提交",
-                completion_status="无法验证",
-                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败，无法提取演草纸照片",
-                deduction=1.50,
-                deduction_reason="提交压缩包损坏解压失败，验算材料无法验证，待人工复核",
-                agent_note="解压失败、内容无法验证、待复核",
-                needs_review=True,
-            ))
-        else:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="验算材料提交",
-                submission_status="未提交",
-                completion_status="未达成",
-                evidence="未检测到手写演草纸照片材料",
-                deduction=1.50,
-                deduction_reason="未提交 Lab 1-2 演草纸手写验算照片",
-                agent_note="手写材料缺失",
-                needs_review=False,
-            ))
-
-        # 8. 姓名、学号、手机号完整性
-        if not images:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="姓名、学号、手机号完整性",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交手写照片材料",
-                deduction=0.0,
-                deduction_reason="未提交手写材料，本项无法验证，不重复扣分",
-                agent_note="无材料无法验证",
-                needs_review=False,
-            ))
-        elif ai_res.get("is_pending"):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="姓名、学号、手机号完整性",
-                submission_status="已提交",
-                completion_status="待复核",
-                evidence=f"AI批改待定: {ai_res.get('reasoning')}",
-                deduction=None,
-                deduction_reason="AI 识别待定，手写身份信息需人工确认",
-                agent_note="手写身份待人工核查",
-                needs_review=True,
-            ))
-        elif ai_res.get("needs_review") and ("演草纸学生身份矛盾" in ai_res.get("review_reason", "")):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="姓名、学号、手机号完整性",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence=f"演草纸身份矛盾: {ai_res.get('review_reason')}",
-                deduction=0.50,
-                deduction_reason=f"演草纸书写身份与目录学生身份冲突: {ai_res.get('review_reason')}",
-                agent_note="纸面与系统身份冲突待复核",
-                needs_review=True,
-            ))
-        else:
-            obs_sid = ai_res.get("student_id_observed")
-            obs_name = ai_res.get("name_observed")
-            obs_phone = ai_res.get("phone_observed")
-            missing_items = []
-            if not obs_name:
-                missing_items.append("姓名")
-            if not obs_sid:
-                missing_items.append("学号")
-            if not obs_phone:
-                missing_items.append("手机号")
-
-            if not missing_items:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="姓名、学号、手机号完整性",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"演草纸手写身份信息齐全 (姓名: {obs_name}, 学号: {obs_sid}, 手机号: {obs_phone})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="手写身份信息齐全",
-                    needs_review=False,
-                ))
-            else:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="姓名、学号、手机号完整性",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"演草纸未完整手写{'、'.join(missing_items)}，已与源码 ({src_path.name if src_path else '源码'}) 及提交目录对照核验一致，按大一宽容原则不扣分",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="依源码与目录核对确认归属，宽容不扣分",
-                    needs_review=False,
-                ))
-
-        # 9. 手写参数与身份及源码一致性
-        if not images:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="手写参数与身份及源码一致性",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交手写照片材料",
-                deduction=0.0,
-                deduction_reason="未提交手写材料，本项无法验证，不重复扣分",
-                agent_note="无材料无法验证",
-                needs_review=False,
-            ))
-        elif ai_res.get("is_pending"):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="手写参数与身份及源码一致性",
-                submission_status="已提交",
-                completion_status="待复核",
-                evidence="AI批改待定",
-                deduction=None,
-                deduction_reason="AI 识别待定，参数一致性需人工核验",
-                agent_note="参数一致性待核验",
-                needs_review=True,
-            ))
-        else:
-            hw_x = ai_res.get("x_observed")
-            hw_y = ai_res.get("y_observed")
-            has_param_mismatch = (hw_x is not None and hw_x != expected_x) or (hw_y is not None and deduced_y is not None and hw_y != deduced_y)
-            if has_param_mismatch:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="手写参数与身份及源码一致性",
-                    submission_status="已提交",
-                    completion_status="未达成",
-                    evidence=f"手写参数 x={hw_x}, y={hw_y} vs 学号后两位={expected_x}, 代码推导y={deduced_y}",
-                    deduction=0.20,
-                    deduction_reason="手写演算所用参数 x 或 y 与学号、手机号或源码参数存在矛盾",
-                    agent_note="手写参数与身份或代码不一致",
-                    needs_review=True,
-                ))
-            else:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="手写参数与身份及源码一致性",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"手写参数 x={hw_x}, y={hw_y} 与身份信息及代码推导完全一致" if (hw_x is not None and hw_y is not None) else f"手写参数与身份信息及代码推导核对一致 (x={expected_x}, y={deduced_y})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="参数一致性完全达成",
-                    needs_review=False,
-                ))
-
-        # 10. 六种运算展开过程完整性
-        if not images:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="六种运算展开过程完整性",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交手写照片材料",
-                deduction=0.0,
-                deduction_reason="未提交手写材料，本项无法验证，不重复扣分",
-                agent_note="无材料无法验证",
-                needs_review=False,
-            ))
-        elif ai_res.get("is_pending"):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="六种运算展开过程完整性",
-                submission_status="已提交",
-                completion_status="待复核",
-                evidence="AI批改待定",
-                deduction=None,
-                deduction_reason="AI 识别待定，展开步骤需人工核实",
-                agent_note="推导展开待核实",
-                needs_review=True,
-            ))
-        else:
-            deriv_sc = float(ai_res.get("derivation_score", 0.0))
-            ops = ai_res.get("operators_found", [])
-            if deriv_sc >= 0.8:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="六种运算展开过程完整性",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"六种运算按位展开推导完整 ({', '.join(ops) if ops else '完整推导'})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="六种运算推导完整",
-                    needs_review=False,
-                ))
-            elif deriv_sc > 0:
-                ded = round(0.8 - deriv_sc, 2)
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="六种运算展开过程完整性",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence=f"发现运算符展开: {ops}; AI批注: {ai_res.get('reasoning')}",
-                    deduction=ded,
-                    deduction_reason="手写演草纸缺少部分逻辑运算或位运算的按位展开过程",
-                    agent_note="展开步骤略有欠缺",
-                    needs_review=False,
-                ))
-            else:
-                items.append(CheckItem(
-                    problem_id="1-2",
-                    sub_item="六种运算展开过程完整性",
-                    submission_status="已提交",
-                    completion_status="未达成",
-                    evidence=f"AI批改记录: {ai_res.get('reasoning')}",
-                    deduction=0.80,
-                    deduction_reason="手写材料未包含有效的按位展开或推导过程",
-                    agent_note="缺少推导过程",
-                    needs_review=False,
-                ))
-
-        # 11. 各验算过程与结果正确性
-        if not images:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="各验算过程与结果正确性",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交手写照片材料",
-                deduction=0.0,
-                deduction_reason="未提交手写材料，本项无法验证，不重复扣分",
-                agent_note="无材料无法验证",
-                needs_review=False,
-            ))
-        elif ai_res.get("is_pending"):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="各验算过程与结果正确性",
-                submission_status="已提交",
-                completion_status="待复核",
-                evidence="AI批改待定",
-                deduction=None,
-                deduction_reason="AI 识别待定，验算正确性需人工核实",
-                agent_note="验算正确性待复核",
-                needs_review=True,
-            ))
-        elif ai_res.get("needs_review"):
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="各验算过程与结果正确性",
-                submission_status="已提交",
-                completion_status="待复核",
-                evidence=f"AI批改疑义: {ai_res.get('review_reason')}",
-                deduction=None,
-                deduction_reason=f"验算过程存在疑义待人工核验: {ai_res.get('review_reason')}",
-                agent_note="存在疑义待人工核查",
-                needs_review=True,
-            ))
-        else:
-            items.append(CheckItem(
-                problem_id="1-2",
-                sub_item="各验算过程与结果正确性",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence="演草纸二进制按位展开与运算结果验算正确",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="验算过程准确",
-                needs_review=False,
-            ))
-
+                add(name, "已提交", "待复核" if needs_review else "未达成" if deduction > 0 else "已达成",
+                    evidence, deduction, evidence if deduction > 0 else "", needs_review)
         prob.check_items = items
         return prob
 
+    @staticmethod
+    def _temperature_result(stdout: str, conversion: str) -> Tuple[Optional[float], str]:
+        """优先取目标温标/结果标签的数值，否则取最后一个数，避免输入回显得分。"""
+        number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+        target = r"摄氏(?:度|温度)?|celsius|centigrade|\bC\b" if conversion == "Centigrade" else r"华氏(?:度|温度)?|fahrenheit|\bF\b"
+        for label in [target, r"result|结果|转换(?:后)?(?:的)?(?:温度)?"]:
+            matches = list(re.finditer(rf"(?:{label})\s*(?:is|为|是|=|:|：)\s*({number})", stdout, re.I))
+            matches = [m for m in matches if not re.match(r"\s*[*/]", stdout[m.end():])]
+            if matches:
+                token = matches[-1].group(1)
+                return float(token), token
+        matches = list(re.finditer(number, stdout))
+        if not matches:
+            return None, ""
+        token = matches[-1].group(0)
+        return float(token), token
+
     def _grade_lab1_3(
-        self,
-        student: Student,
-        sources: List[Path],
-        build_dir: Path,
-        mock_ai: bool,
-        projects: Optional[List[Path]] = None,
+        self, student: Student, sources: List[Path], build_dir: Path,
+        mock_ai: bool = False, projects: Optional[List[Path]] = None,
         links: Optional[List[Path]] = None,
         all_student_files: Optional[List[SubmissionFile]] = None,
         precompiled: Optional[Dict[Tuple[str, str, int], CompileResult]] = None,
     ) -> ProblemResult:
-        """评测 Lab 1-3：温度转换 (2.0分)"""
+        """十例均分2分；数值容差0.08；两位小数格式整题额外扣0.20一次。"""
         prob = ProblemResult(problem_id="1-3", score=0.0, max_score=2.0, source_files=sources)
-        projects = projects or []
-        links = links or []
         all_files = all_student_files or []
-        corrupt_archives = [f for f in all_files if f.file_type == "corrupt_archive"]
-
-        c_res: Optional[CompileResult] = None
-        outputs_collected = []
-        has_int_div_bug = False
-        passed_cases = 0
-        total_cases = len(self.lab1_3_cases)
-
-        if not sources:
-            if corrupt_archives:
-                prob.status = "needs_review"
-                prob.score = 0.0
-                prob.notes.append(f"收到学生提交压缩包 ({corrupt_archives[0].original_name})，解压失败，内容无法验证，待人工复核")
-                prob.needs_review = True
-                prob.review_reasons.append(f"提交压缩包损坏解压失败: {corrupt_archives[0].original_name}，Lab 1-3 源码无法验证")
-            elif projects:
-                prob.status = "missing_source"
-                prob.score = 0.0
-                prob.notes.append("未提交 Lab 1-3 源码 (仅提交 Code::Blocks 工程描述文件 .cbp，缺少 .c 源码)")
-                prob.needs_review = True
-                prob.review_reasons.append("Lab 1-3 仅提交工程文件 (.cbp)，缺源码")
-            elif links:
-                prob.status = "missing_source"
-                prob.score = 0.0
-                prob.notes.append("未提交 Lab 1-3 源码 (提交内容为 Windows 快捷方式 .lnk，缺实际源码)")
-                prob.needs_review = True
-                prob.review_reasons.append("Lab 1-3 提交为 Windows 快捷方式 (.lnk)，缺源码")
-            else:
-                prob.status = "missing"
-                prob.notes.append("未提交 Lab 1-3 源码")
-        else:
-            # 存在一份或多份源码候选：逐一评测，择优采用最高分版本
-            cand_evaluations = []
-            for cand_idx, cand_src in enumerate(sources):
-                sf = next((f for f in all_files if f.path == cand_src), None)
-                c_encoding_error = sf.encoding_error if sf else ""
-                try:
-                    c_text = cand_src.read_text(encoding="utf-8") if cand_src.exists() else ""
-                except Exception as e:
-                    c_text = ""
-                    c_encoding_error = f"UTF-8 解码失败: {e}"
-
-                if precompiled and (student.student_id, "1-3", cand_idx) in precompiled:
-                    c_compile = precompiled[(student.student_id, "1-3", cand_idx)]
-                else:
-                    c_compile = self.compiler.compile(cand_src, build_dir, f"lab1_3_cand_{cand_idx}")
-                c_results = []
-                c_outputs = []
-                c_notes = []
-                c_reviews = []
-                c_needs_review = False
-                c_is_pending = False
-                c_has_int_div_bug = False
-                c_passed_cases = 0
-
-                if c_encoding_error:
-                    c_notes.append(f"源码编码损坏: {c_encoding_error}")
-                    c_needs_review = True
-                    c_reviews.append(f"源码存在不可恢复的编码损坏无法严格解码: {c_encoding_error}")
-                elif sf and sf.encoding_converted:
-                    c_notes.append(f"源码已自 {sf.source_encoding} 规范化为 UTF-8")
-
-                if not c_compile.success:
-                    c_notes.append(f"Lab 1-3 ({cand_src.name}) 编译失败")
-                else:
-                    for idx, (in_str, conv_type, expected_val) in enumerate(self.lab1_3_cases, 1):
-                        exec_res = run_binary(c_compile.binary_path, input_str=in_str, timeout=2.0)
-                        c_outputs.append(exec_res.stdout.strip())
-
-                        case_res = TestCaseResult(
-                            case_id=f"case_{idx}",
-                            input_data=in_str.strip(),
-                            expected_output=f"{conv_type}: {expected_val:.2f}",
-                            actual_output=exec_res.stdout.strip(),
-                            passed=False,
-                            score=0.0,
-                            max_score=round(2.0 / total_cases, 2),
-                            timed_out=exec_res.timed_out,
-                            exit_code=exec_res.exit_code,
-                        )
-
-                        if exec_res.timed_out:
-                            case_res.error_message = "运行超时"
-                        elif exec_res.exit_code != 0:
-                            case_res.error_message = f"运行时异常 (exit {exec_res.exit_code})"
-                        else:
-                            floats = [float(fl) for fl in re.findall(r"-?\b\d+(?:\.\d+)?\b", exec_res.stdout)]
-
-                            other_specific_targets = [
-                                v for _, _, v in self.lab1_3_cases
-                                if abs(v - expected_val) > 0.1 and abs(v) > 0.1 and abs(v - 32.0) > 0.1
-                            ]
-                            matches_other_targets = sum(
-                                1 for ot in other_specific_targets if any(abs(f - ot) <= 0.05 for f in floats)
-                            )
-                            if matches_other_targets >= 2:
-                                case_res.error_message = "检测到程序同时输出多个无关特定参考答案，判定作弊刷屏"
-                                c_results.append(case_res)
-                                continue
-
-                            found_match = False
-                            for val in floats:
-                                if abs(val - expected_val) <= 0.08:
-                                    found_match = True
-                                    break
-
-                            if found_match:
-                                case_res.passed = True
-                                case_res.score = case_res.max_score
-                                c_passed_cases += 1
-                            else:
-                                if expected_val != 0.0 and conv_type == "Centigrade":
-                                    if any(abs(val - 0.0) < 0.001 for val in floats):
-                                        c_has_int_div_bug = True
-
-                                if idx == 1:
-                                    ai_sem = SemanticAmbiguityReviewer.review_output(
-                                        problem_id="1-3",
-                                        student_id=student.student_id,
-                                        input_data=in_str,
-                                        expected_behavior=f"温度转换输出接近 {expected_val:.2f}",
-                                        actual_output=exec_res.stdout,
-                                        source_code=c_text,
-                                        max_score=case_res.max_score,
-                                        mock_mode=mock_ai,
-                                    )
-                                    if ai_sem.get("passed"):
-                                        case_res.passed = True
-                                        case_res.score = float(ai_sem.get("suggested_score", case_res.max_score))
-                                        c_passed_cases += 1
-                                    elif ai_sem.get("is_pending"):
-                                        c_is_pending = True
-                                        c_needs_review = True
-                                        c_reviews.append("1-3 语义复核待定")
-                                case_res.error_message = f"未在输出中识别到数值 {expected_val:.2f}"
-
-                        c_results.append(case_res)
-
-                    if len(set(c_outputs)) == 1 and len(c_outputs) > 1:
-                        c_notes.append("检测到程序在不同输入下输出完全相同的静态文本，判定未读取输入")
-                        c_passed_cases = 0
-                        for cr in c_results:
-                            cr.passed = False
-                            cr.score = 0.0
-                            cr.error_message = "静态输出检测失败：不同输入输出无变化"
-
-                    f2c_idx = [0, 1, 2, 6, 7, 9]
-                    f2c_cases = [c_results[i] for i in f2c_idx if i < len(c_results)]
-                    passed_f2c_cand = sum(1 for c in f2c_cases if c.passed)
-                    total_f2c_cand = len(f2c_cases)
-                    if passed_f2c_cand == total_f2c_cand:
-                        c_has_int_div_bug = False
-
-                    if c_has_int_div_bug:
-                        c_notes.append("检测到典型 C 语言整型截断除法缺陷 (如 5/9 得 0)")
-
-                cand_score = sum(cr.score for cr in c_results)
-                cand_evaluations.append({
-                    "cand_idx": cand_idx,
-                    "src_path": cand_src,
-                    "score": cand_score,
-                    "passed_cases": c_passed_cases,
-                    "c_res": c_compile,
-                    "test_results": c_results,
-                    "outputs": c_outputs,
-                    "src_text": c_text,
-                    "notes": c_notes,
-                    "reviews": c_reviews,
-                    "needs_review": c_needs_review,
-                    "is_pending": c_is_pending,
-                    "has_int_div_bug": c_has_int_div_bug,
-                    "success": c_compile.success,
-                })
-
-            # 择优采用最高分候选版本
-            best_eval = max(
-                cand_evaluations,
-                key=lambda x: (
-                    x["score"],
-                    x["passed_cases"],
-                    1 if x["success"] else 0,
-                    0 if x["has_int_div_bug"] else 1,
-                    -x["cand_idx"]
-                )
-            )
-            src_path = best_eval["src_path"]
-            src_text = best_eval["src_text"]
-            c_res = best_eval["c_res"]
-            prob.compile_result = c_res
-            prob.test_results = best_eval["test_results"]
-            outputs_collected = best_eval["outputs"]
-            passed_cases = best_eval["passed_cases"]
-            has_int_div_bug = best_eval["has_int_div_bug"]
-            prob.notes.extend(best_eval["notes"])
-            if best_eval["needs_review"]:
-                prob.needs_review = True
-                prob.review_reasons.extend(best_eval["reviews"])
-            if best_eval["is_pending"]:
-                prob.is_pending = True
-
-            prob.score = round(2.0 * (passed_cases / total_cases), 2)
-            if prob.is_pending:
-                prob.status = "needs_review"
-                prob.score = 0.0
-            elif passed_cases == total_cases:
-                prob.status = "passed"
-            elif passed_cases > 0:
-                prob.status = "partial"
-            elif not c_res.success:
-                prob.status = "compile_error"
-            else:
-                prob.status = "failed"
-
-            prob.candidate_evaluations = [
-                {
-                    "index": c["cand_idx"],
-                    "src_path": str(c["src_path"]),
-                    "filename": c["src_path"].name,
-                    "score": c["score"],
-                    "passed_cases": c["passed_cases"],
-                    "compile_success": c["success"],
-                    "needs_review": c["needs_review"],
-                    "notes": c["notes"],
-                    "reviews": c["reviews"],
-                }
-                for c in cand_evaluations
-            ]
-            prob.chosen_candidate = {
-                "index": best_eval["cand_idx"],
-                "src_path": str(best_eval["src_path"]),
-                "filename": best_eval["src_path"].name,
-                "score": best_eval["score"],
-                "passed_cases": best_eval["passed_cases"],
-                "reason": f"最高分版本 ({prob.score:.2f}/2.00, 通过率 {passed_cases}/{total_cases})",
-            }
-
-            prob.notes.append(f"测试通过率: {passed_cases}/{total_cases}")
+        corrupt = [f for f in all_files if f.file_type == "corrupt_archive"]
+        projects, links = projects or [], links or []
+        weight = 2.0 / len(self.lab1_3_cases)
+        candidates = []
+        for index, source in enumerate(sources):
+            sf = next((f for f in all_files if f.path == source), None)
+            encoding_error = sf.encoding_error if sf else ""
+            try:
+                source_text = source.read_text(encoding="utf-8")
+            except (UnicodeError, OSError) as e:
+                source_text = ""
+                encoding_error = str(e)
+            key = (student.student_id, "1-3", index)
+            compiled = precompiled[key] if precompiled and key in precompiled else self.compiler.compile(source, build_dir, f"lab1_3_cand_{index}")
+            cases, tokens, values, outputs = [], [], [], []
+            reviews = [f"源码编码损坏，待复核: {encoding_error}"] if encoding_error else []
+            notes = []
+            if sf and sf.encoding_converted:
+                notes.append(f"源码已自 {sf.source_encoding} 规范化为UTF-8")
+            if compiled.success:
+                for i, (input_text, conversion, expected) in enumerate(self.lab1_3_cases):
+                    execution = run_binary(compiled.binary_path, input_str=input_text, timeout=2.0)
+                    outputs.append(execution.stdout.strip())
+                    result = TestCaseResult(f"case_{i+1}", input_text.strip(), f"{conversion}: {expected:.2f}", execution.stdout.strip(), False, 0.0, weight,
+                                            timed_out=execution.timed_out, exit_code=execution.exit_code)
+                    actual, token = None, ""
+                    if execution.timed_out:
+                        result.error_message = "运行超时"
+                    elif execution.exit_code != 0:
+                        result.error_message = f"运行异常(exit {execution.exit_code})"
+                    else:
+                        actual, token = self._temperature_result(execution.stdout, conversion)
+                        result.passed = actual is not None and abs(actual - expected) <= 0.08 + 1e-9
+                        if not result.passed and i == 0:
+                            semantic = SemanticAmbiguityReviewer.review_output(
+                                problem_id="1-3", student_id=student.student_id, input_data=input_text,
+                                expected_behavior=f"按C/C++实际类型和运算规则核验本次运行；最终{conversion}结果应接近{expected:.2f}，容差0.08。菜单和输入回显不作为结果。两位小数格式由程序单独判断，数值错误不得因公式思路正确而通过。",
+                                actual_output=execution.stdout, source_code=source_text,
+                                max_score=weight, mock_mode=mock_ai)
+                            if semantic.get("is_pending") or (semantic.get("needs_review") and not semantic.get("passed")):
+                                result.needs_review = True
+                                result.review_reason = semantic.get("review_reason") or "语义复核待定"
+                                reviews.append("1-3 语义复核待定: " + result.review_reason)
+                            elif semantic.get("passed"):
+                                # 用例只分通过/不通过；不使用AI连续分值参与候选择优。
+                                result.passed = True
+                        if not result.passed:
+                            result.error_message = f"最终结果{actual}与预期{expected:.2f}不符（容差0.08）"
+                    result.score = weight if result.passed else 0.0
+                    cases.append(result)
+                    tokens.append(token)
+                    values.append(actual)
+                if len(set(outputs)) == 1 and len(outputs) > 1:
+                    notes.append("不同输入下输出完全相同；单一结果仍逐例比较，不另扣整题")
+                    # 保留对倾倒整组答案的拦截：多组未标注结果不能选其中一个刷分。
+                    numbers = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", outputs[0])
+                    if len(numbers) > 1 and not re.search(r"result|结果|celsius|centigrade|fahrenheit|摄氏|华氏", outputs[0], re.I):
+                        notes.append("多输入固定输出多组未标注答案，无法认定唯一有效结果")
+                        for case in cases:
+                            case.passed, case.score = False, 0.0
+                            case.error_message = "固定倾倒多组答案，未提供当前输入的唯一结果"
+                clean_source = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"', '', source_text, flags=re.S)
+                nonzero_f = [i for i, (_, conv, exp) in enumerate(self.lab1_3_cases) if conv == "Centigrade" and exp != 0]
+                if (re.search(r'\(\s*5\s*/\s*9\s*\)', clean_source)
+                        and all(values[i] is not None and abs(values[i]) < 1e-9 and not cases[i].passed for i in nonzero_f)):
+                    notes.append("源码括号内整数表达式(5/9)先截断为0，且所有非零预期华氏转换实测结果为0；此诊断不额外扣分")
+            format_failures = [i for i, case in enumerate(cases) if case.passed and tokens[i] and not re.fullmatch(r"[-+]?(?:\d+)?\.\d{2}", tokens[i])]
+            # 无法解析但语义通过时，格式证据仍须复核。
+            format_unknown = [i for i, case in enumerate(cases) if case.passed and not tokens[i]]
+            if format_unknown:
+                reviews.append("输出数值由语义复核通过，但缺少可核验的小数格式证据")
+            numeric_score = sum(case.score for case in cases)
+            format_deduction = min(numeric_score, 0.2) if format_failures else 0.0
+            pending = bool(encoding_error or format_unknown or any(case.needs_review for case in cases))
+            candidates.append(dict(index=index, source=source, compiled=compiled, cases=cases,
+                tokens=tokens, numeric_score=numeric_score, format_deduction=format_deduction,
+                format_failures=format_failures, score=round(numeric_score-format_deduction, 2),
+                reviews=reviews, notes=notes, pending=pending, encoding_error=encoding_error))
+        chosen = None
+        if candidates:
+            chosen = max(candidates, key=lambda c: (c["score"], not c["pending"], c["compiled"].success, -c["index"]))
+            prob.compile_result = chosen["compiled"]
+            prob.test_results = chosen["cases"]
+            prob.score = chosen["score"]
+            prob.is_pending = chosen["pending"]
+            prob.needs_review = bool(chosen["reviews"])
+            prob.review_reasons = chosen["reviews"]
+            prob.notes = chosen["notes"] + [f"测试通过率: {sum(c.passed for c in prob.test_results)}/{len(self.lab1_3_cases)}；每例{weight:.2f}分；格式整题扣{chosen['format_deduction']:.2f}"]
+            for candidate in candidates:
+                prob.candidate_evaluations.append(dict(index=candidate["index"], src_path=str(candidate["source"]), filename=candidate["source"].name,
+                    score=candidate["score"], numeric_score=round(candidate["numeric_score"], 2), format_deduction=candidate["format_deduction"],
+                    passed_cases=sum(case.passed for case in candidate["cases"]), compile_success=candidate["compiled"].success,
+                    needs_review=candidate["pending"], notes=candidate["notes"], reviews=candidate["reviews"]))
+            prob.chosen_candidate = {**prob.candidate_evaluations[chosen["index"]], "reason": "按用例均分与整题格式扣分完整评定后最高分"}
             if len(sources) > 1:
-                prob.notes.append(f"检测到 {len(sources)} 份 1-3 源码候选: {[s.name for s in sources]}，已择优评测采用最高分版本: {src_path.name} (得分: {prob.score:.2f}/2.00)")
-
-        # --- 构建结构化检查分项 (CheckItems: 6 个题目分项) ---
-        items: List[CheckItem] = []
-
-        # 1. 源码提交
-        if sources:
-            src_sf = next((f for f in all_files if f.path == src_path), None)
-            enc_note = f" (已自 {src_sf.source_encoding} 规范化为 UTF-8)" if (src_sf and src_sf.encoding_converted) else ""
-            ev_str = f"提交源码文件: {src_path.name}{enc_note} (共 {len(sources)} 份候选，已择优采用最高分版本)" if len(sources) > 1 else f"提交源码文件: {src_path.name}{enc_note}"
-            an_str = f"多候选已择优采用最高分版本: {src_path.name}{enc_note}" if len(sources) > 1 else (f"源码文件已规范化为 UTF-8 (来源编码: {src_sf.source_encoding})" if (src_sf and src_sf.encoding_converted) else "源码归档正常")
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="源码提交",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=ev_str,
-                deduction=0.0,
-                deduction_reason="",
-                agent_note=an_str,
-                needs_review=False,
-            ))
-        elif corrupt_archives:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="源码提交",
-                submission_status="已提交",
-                completion_status="无法验证",
-                evidence=f"已提交压缩包 {corrupt_archives[0].original_name}，但文件损坏解压失败: {corrupt_archives[0].note or '解压异常'}",
-                deduction=2.00,
-                deduction_reason="提交压缩包损坏解压失败，Lab 1-3 源码无法验证，待人工复核",
-                agent_note="解压失败、内容无法验证、待复核",
-                needs_review=True,
-            ))
-        elif projects:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="源码提交",
-                submission_status="无法归属",
-                completion_status="未达成",
-                evidence=f"归档项目描述文件: {', '.join(p.name for p in projects)}",
-                deduction=2.00,
-                deduction_reason="仅提交 Code::Blocks 工程文件 (.cbp)，缺少可编译 C 源码",
-                agent_note="仅提交工程文件，缺少源码",
-                needs_review=True,
-            ))
-        elif links:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="源码提交",
-                submission_status="无法归属",
-                completion_status="未达成",
-                evidence=f"归档快捷方式: {', '.join(l.name for l in links)}",
-                deduction=2.00,
-                deduction_reason="提交内容为 Windows 快捷方式 (.lnk)，缺实际源程序",
-                agent_note="提交内容为快捷方式，缺少源码",
-                needs_review=True,
-            ))
+                prob.notes.append(f"检测到{len(sources)}份源码候选，采用最高分版本: {chosen['source'].name}")
+            prob.status = "needs_review" if prob.is_pending else "compile_error" if not prob.compile_result.success else "passed" if prob.score == 2 else "partial" if prob.score > 0 else "failed"
         else:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="源码提交",
-                submission_status="未提交",
-                completion_status="未达成",
-                evidence="未检测到 Lab 1-3 源码文件",
-                deduction=2.00,
-                deduction_reason="未提交 Lab 1-3 源码文件",
-                agent_note="未提交源码",
-                needs_review=False,
-            ))
+            reason = "提交压缩包损坏解压失败，内容无法验证" if corrupt else "仅提交 .cbp 工程文件，缺源码" if projects else "仅提交 .lnk 快捷方式，缺源码" if links else "未提交Lab 1-3源码"
+            prob.notes.append(reason)
+            prob.needs_review = bool(corrupt or projects or links)
+            prob.is_pending = bool(corrupt)
+            prob.review_reasons = [reason] if prob.needs_review else []
+            prob.status = "needs_review" if prob.is_pending else "missing_source" if prob.needs_review else "missing"
 
-        # 2. 编译与运行
+        def add(name, submitted, completed, evidence, deduction=0.0, reason="", review=False):
+            prob.check_items.append(CheckItem("1-3", name, submitted, completed, evidence, deduction, reason, reason, review))
+        add("源码提交", "已提交" if sources or corrupt else "无法归属" if projects or links else "未提交",
+            "已达成" if sources else "待复核" if corrupt else "未达成",
+            f"源码: {chosen['source']}；候选数={len(sources)}" if chosen else prob.notes[0],
+            0.0 if sources else None if corrupt else 2.0, "" if sources else prob.notes[0], bool(corrupt or projects or links) and not sources)
+        compiled_ok = bool(prob.compile_result and prob.compile_result.success)
         if not sources:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="编译与运行",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="未提交源码文件",
-                deduction=0.0,
-                deduction_reason="因缺少源码，本项无法验证，不重复扣分（已在源码提交项计扣）",
-                agent_note="无源码无法编译",
-                needs_review=False,
-            ))
-        elif c_res and not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="未达成",
-                evidence=f"GCC 诊断: {c_res.stderr[:160]}",
-                deduction=2.00,
-                deduction_reason="GCC 编译失败，无法生成二进制执行文件",
-                agent_note="编译失败",
-                needs_review=False,
-            ))
+            add("编译与运行", "不适用", "无法验证", "缺源码，不重复扣分")
+        elif not compiled_ok:
+            add("编译与运行", "已提交", "待复核" if chosen["encoding_error"] else "未达成", prob.compile_result.stderr[:200],
+                None if chosen["encoding_error"] else 2.0, "编码异常待核验" if chosen["encoding_error"] else "编译失败，无法执行全部用例", bool(chosen["encoding_error"]))
         else:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="编译与运行",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence=f"GCC 编译成功 ({c_res.duration_ms:.1f}ms)，测试用例可正常执行" if c_res else "编译运行正常",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="编译运行通过",
-                needs_review=False,
-            ))
-
-        # 3. 华氏转摄氏计算 (模式 0)
-        if not sources or not c_res or not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="华氏转摄氏计算",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功编译运行",
-                deduction=0.0,
-                deduction_reason="编译未通过，转换功能无法验证",
-                agent_note="无法验证",
-                needs_review=False,
-            ))
+            abnormal = [c.case_id for c in prob.test_results if c.timed_out or c.exit_code != 0]
+            add("编译与运行", "已提交", "部分达成" if abnormal else "已达成",
+                f"GCC编译成功；运行异常用例={abnormal}；异常用例按所属方向计扣")
+        for name, conversion in [("华氏转摄氏计算", "Centigrade"), ("摄氏转华氏计算", "Fahrenheit")]:
+            if not compiled_ok:
+                add(name, "不适用", "无法验证", "未成功编译，不重复扣分")
+                continue
+            cases = [case for case, (_, conv, _) in zip(prob.test_results, self.lab1_3_cases) if conv == conversion]
+            failed = [case for case in cases if not case.passed and not case.needs_review]
+            pending_cases = [case for case in cases if case.needs_review]
+            evidence = "; ".join(f"{c.case_id} 输入[{c.input_data}]：{'待复核' if c.needs_review else '通过' if c.passed else '失败'}，输出[{c.actual_output}]，预期[{c.expected_output}]" for c in cases)
+            add(name, "已提交", "待复核" if pending_cases else "已达成" if not failed else "未达成" if len(failed) == len(cases) else "部分达成",
+                evidence, None if pending_cases else round(len(failed)*weight, 2),
+                "用例待复核" if pending_cases else f"{len(failed)}个用例未通过，每例扣{weight:.2f}" if failed else "", bool(pending_cases))
+        boundary = [case for case, (inp, _, _) in zip(prob.test_results, self.lab1_3_cases) if float(inp.split()[1]) <= 0 or '.' in inp.split()[1]]
+        add("边界、负温与浮点测试", "已提交" if compiled_ok else "不适用",
+            "待复核" if any(c.needs_review for c in boundary) else "已达成" if compiled_ok and all(c.passed for c in boundary) else "部分达成" if compiled_ok else "无法验证",
+            "负温、零度和浮点用例按对应方向每例计分，本项只记录覆盖情况，不重复扣分",
+            review=any(c.needs_review for c in boundary))
+        if not compiled_ok:
+            add("输出精度与格式", "不适用", "无法验证", "未成功编译，无法验证格式")
+        elif any(case.passed and not token for case, token in zip(prob.test_results, chosen["tokens"])):
+            add("输出精度与格式", "已提交", "待复核", "语义通过但未识别到明确结果数值格式", None, "格式证据待核验", True)
         else:
-            f2c_idx = [0, 1, 2, 6, 7, 9]
-            f2c_cases = [prob.test_results[i] for i in f2c_idx if i < len(prob.test_results)]
-            passed_f2c = sum(1 for c in f2c_cases if c.passed)
-            total_f2c = len(f2c_cases)
-            if passed_f2c == total_f2c:
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="华氏转摄氏计算",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"华氏转摄氏用例全部通过 ({passed_f2c}/{total_f2c})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="华氏转摄氏正确",
-                    needs_review=False,
-                ))
-            elif has_int_div_bug:
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="华氏转摄氏计算",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence=f"模式0输出样例: {outputs_collected[0] if outputs_collected else ''} (预期37.78)，摄氏度结果恒为 0 或 32",
-                    deduction=0.80,
-                    deduction_reason="存在典型整型截断除法缺陷 (5/9 在 C 语言中得 0，导致摄氏度输出为 0.00)",
-                    agent_note="整型除法 5/9 截断缺陷",
-                    needs_review=False,
-                ))
-            else:
-                comp_st = "部分达成" if passed_f2c > 0 else "未达成"
-                ded = round(0.80 * (1 - passed_f2c / total_f2c), 2)
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="华氏转摄氏计算",
-                    submission_status="已提交",
-                    completion_status=comp_st,
-                    evidence=f"华氏转摄氏通过率 {passed_f2c}/{total_f2c}",
-                    deduction=ded,
-                    deduction_reason="华氏转摄氏计算错误，部分用例输出不符预期",
-                    agent_note=f"华氏转摄氏未全通过 ({passed_f2c}/{total_f2c})",
-                    needs_review=False,
-                ))
-
-        # 4. 摄氏转华氏计算 (模式 1)
-        if not sources or not c_res or not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="摄氏转华氏计算",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功编译运行",
-                deduction=0.0,
-                deduction_reason="编译未通过，转换功能无法验证",
-                agent_note="无法验证",
-                needs_review=False,
-            ))
-        else:
-            c2f_idx = [3, 4, 5, 8]
-            c2f_cases = [prob.test_results[i] for i in c2f_idx if i < len(prob.test_results)]
-            passed_c2f = sum(1 for c in c2f_cases if c.passed)
-            total_c2f = len(c2f_cases)
-            if passed_c2f == total_c2f:
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="摄氏转华氏计算",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"摄氏转华氏用例全部通过 ({passed_c2f}/{total_c2f})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="摄氏转华氏正确",
-                    needs_review=False,
-                ))
-            else:
-                comp_st = "部分达成" if passed_c2f > 0 else "未达成"
-                ded = round(0.80 * (1 - passed_c2f / total_c2f), 2)
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="摄氏转华氏计算",
-                    submission_status="已提交",
-                    completion_status=comp_st,
-                    evidence=f"摄氏转华氏通过率 {passed_c2f}/{total_c2f}",
-                    deduction=ded,
-                    deduction_reason="摄氏转华氏计算错误，部分用例输出不符预期",
-                    agent_note=f"摄氏转华氏未全通过 ({passed_c2f}/{total_c2f})",
-                    needs_review=False,
-                ))
-
-        # 5. 边界、负温与浮点测试
-        if not sources or not c_res or not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="边界、负温与浮点测试",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功编译运行",
-                deduction=0.0,
-                deduction_reason="编译未通过，边界测试无法验证",
-                agent_note="无法验证",
-                needs_review=False,
-            ))
-        else:
-            bound_idx = [2, 4, 6, 7, 8]
-            bound_cases = [prob.test_results[i] for i in bound_idx if i < len(prob.test_results)]
-            passed_bound = sum(1 for c in bound_cases if c.passed)
-            total_bound = len(bound_cases)
-            if passed_bound == total_bound:
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="边界、负温与浮点测试",
-                    submission_status="已提交",
-                    completion_status="已达成",
-                    evidence=f"负温 (-40度互转)、零度及小数测试全部通过 ({passed_bound}/{total_bound})",
-                    deduction=0.0,
-                    deduction_reason="",
-                    agent_note="边界测试全部通过",
-                    needs_review=False,
-                ))
-            else:
-                ded = round(0.20 * (1 - passed_bound / total_bound), 2)
-                items.append(CheckItem(
-                    problem_id="1-3",
-                    sub_item="边界、负温与浮点测试",
-                    submission_status="已提交",
-                    completion_status="部分达成",
-                    evidence=f"边界与小数用例通过率 {passed_bound}/{total_bound}",
-                    deduction=ded,
-                    deduction_reason="负温或浮点小数边界测试存在未通过用例",
-                    agent_note="边界用例部分未通过",
-                    needs_review=False,
-                ))
-
-        # 6. 输出精度与格式
-        if not sources or not c_res or not c_res.success:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="输出精度与格式",
-                submission_status="不适用",
-                completion_status="无法验证",
-                evidence="代码未成功编译运行",
-                deduction=0.0,
-                deduction_reason="编译未通过，输出精度无法验证",
-                agent_note="无法验证",
-                needs_review=False,
-            ))
-        else:
-            items.append(CheckItem(
-                problem_id="1-3",
-                sub_item="输出精度与格式",
-                submission_status="已提交",
-                completion_status="已达成",
-                evidence="温度数值误差在 ±0.05 容差范围内且保留有效小数位",
-                deduction=0.0,
-                deduction_reason="",
-                agent_note="精度与格式符合要求",
-                needs_review=False,
-            ))
-
-        prob.check_items = items
+            bad = chosen["format_failures"]
+            add("输出精度与格式", "已提交", "部分达成" if bad else "已达成" if any(c.passed for c in prob.test_results) else "无法验证",
+                f"容差0.08；数值正确但非两位小数的用例={[i+1 for i in bad]}；整题只扣一次0.20，最低0分",
+                round(chosen["format_deduction"], 2), "结果小数位数不等于2，整题额外扣0.20一次" if bad else "")
         return prob
 
     def generate_comment(self, grade: StudentGrade) -> str:
-        """根据学生各题各分项检查事实，动态生成不少于50字的高质量实验评语"""
-        student = grade.student
-
-        # 1. 完全缺交作业
+        """依据检查事实生成整次实验评语，保留具体复核事项。"""
         if grade.status == "missing":
-            return (
-                f"{student.name}同学你好！系统未检测到你在本次实验1中的作业提交（未收到源码文件及演草纸验算照片）。"
-                f"按课程大纲与实验教学要求，请尽快核实是否由于提交逾期或文件路径遗漏，并及时联系助教说明情况补交，"
-                f"以便及时核对并确认你的实验平时成绩。"
-            )
-
-        # 损坏压缩包特殊评语
-        corrupt_reasons = [r for r in grade.review_reasons if "提交压缩包损坏" in r or "解压失败" in r]
-        if corrupt_reasons and grade.status == "needs_review":
-            return (
-                f"{student.name}同学你好！本次实验1已检测并记录到你提交的压缩包文件，但该文件损坏无法正常解压，"
-                f"导致评测机无法提取其中的源程序代码与演草纸材料进行自动化评测；系统已保留你的提交记录并标记为待人工复核，"
-                f"不会直接记为未交，请尽快联系课程助教重新提交有效的压缩包文件进行成绩复核。"
-            )
-
-        # 2. 仅提交项目描述文件 (.cbp) 或快捷方式 (.lnk) 缺少源码
-        r1_2 = grade.problem_results.get("1-2")
-        r1_3 = grade.problem_results.get("1-3")
-
-        has_cbp = any("仅提交 .cbp" in r or ".cbp" in r for r in grade.review_reasons)
-        has_lnk = any(".lnk" in r for r in grade.review_reasons)
-        has_exe = any("Wprogram.exe" in r or "预编译" in r for r in grade.review_reasons)
-
-        if (has_cbp or has_lnk) and grade.status in {"missing_source", "needs_review"} and not (r1_2 and r1_2.compile_result and r1_2.compile_result.success):
-            ft_desc = "Code::Blocks 工程描述文件 (.cbp)" if has_cbp else "Windows 快捷方式 (.lnk)"
-            return (
-                f"{student.name}同学你好！本次实验1提交文件中检测到 {ft_desc}，但缺少实际的 C 语言源码文件（.c/.cpp），"
-                f"导致 Lab 1-2 与 Lab 1-3 无法在评测环境中进行编译运行与黑盒测试；演草纸手写验算材料已完成归档记录，"
-                f"因源码缺失该作业暂记为待复核，请尽快携带源程序联系助教进行现场补交与成绩核验。"
-            )
-
-        # 3. 结构化提炼已达成与未达成项
-        success_parts = []
-        improvement_parts = []
-        review_parts = []
-
-        # 分析 Lab 1-2 源码
-        if r1_2:
-            code_items = [it for it in r1_2.check_items if "验算" not in it.sub_item and "手写" not in it.sub_item and "完整性" not in it.sub_item and "正确性" not in it.sub_item]
-            hw_items = [it for it in r1_2.check_items if it not in code_items]
-
-            # 代码部分
-            if any(it.sub_item == "源码提交" and it.completion_status == "未达成" for it in code_items):
-                if has_exe:
-                    improvement_parts.append("Lab 1-2 仅提交了预编译 exe 文件而未包含 C 源码，按安全规范无法执行代码测试")
-                else:
-                    improvement_parts.append("Lab 1-2 未提交有效的 C 语言源程序")
-            elif any(it.sub_item == "编译与运行" and it.completion_status == "未达成" for it in code_items):
-                improvement_parts.append("Lab 1-2 源码存在语法错误无法通过 GCC 编译，运算逻辑无法验证")
+            return (f"{grade.student.name}同学你好！本次实验1未检测到可归属的源码和验算材料提交，请核对提交文件与提交记录，并联系助教确认材料是否已经收到，以便完成实验成绩核验。")
+        if any("压缩包损坏" in reason for reason in grade.review_reasons):
+            return (f"{grade.student.name}同学你好！已收到你的实验1提交压缩包，但文件损坏无法正常解压，源码及验算材料内容目前无法验证，成绩保留待人工复核。请核对压缩包能否正常打开并联系助教补充可读取的原始材料，本次情况不按未交处理。")
+        parts = [f"{grade.student.name}同学你好！本次实验1验收如下："]
+        for pid in ["1-2", "1-3"]:
+            prob = grade.problem_results.get(pid)
+            if not prob:
+                continue
+            if prob.compile_result and prob.compile_result.success:
+                parts.append(f"Lab {pid}源码已提交并通过编译，实际运算测试通过{sum(c.passed for c in prob.test_results)}/{len(prob.test_results)}项。")
+            elif prob.compile_result:
+                parts.append(f"Lab {pid}源码已提交，但编译失败，计算结果尚无法验证。")
             else:
-                passed_terms_ok = all(it.completion_status == "已达成" for it in code_items if "运算" in it.sub_item)
-                if passed_terms_ok and all(it.completion_status == "已达成" for it in code_items if "参数" in it.sub_item):
-                    success_parts.append("Lab 1-2 逻辑与位运算 9 项测试全部正确，变量 x、y 正确对齐学号手机号")
-                else:
-                    failed_sub = [it.sub_item for it in code_items if it.completion_status in {"未达成", "部分达成"}]
-                    if failed_sub:
-                        improvement_parts.append(f"Lab 1-2 在{'、'.join(failed_sub)}方面存在偏差，需修正运算逻辑")
-                    else:
-                        success_parts.append("Lab 1-2 基础运算测试已通过")
-
-            # 手写验算部分
-            if any(it.sub_item == "验算材料提交" and it.completion_status == "未达成" for it in hw_items):
-                improvement_parts.append("未提交 Lab 1-2 演草纸手写验算照片")
-            else:
-                hw_all_ok = all(it.completion_status == "已达成" for it in hw_items)
-                if hw_all_ok:
-                    success_parts.append("演草纸手写演算规范清晰，姓名学号与推导过程完整，六种运算展开准确无误")
-                else:
-                    hw_issues = [it.deduction_reason for it in hw_items if it.deduction and it.deduction > 0]
-                    if hw_issues:
-                        improvement_parts.append(f"手写演草纸材料中{hw_issues[0]}")
-                    elif any(it.completion_status == "待复核" for it in hw_items):
-                        review_parts.append("手写演草纸材料存在待人工复核事项（字迹辨识或推导疑义）")
-
-        # 分析 Lab 1-3 温度转换
-        if r1_3:
-            if any(it.sub_item == "源码提交" and it.completion_status == "未达成" for it in r1_3.check_items):
-                improvement_parts.append("Lab 1-3 未提交有效 C 源码")
-            elif any(it.sub_item == "编译与运行" and it.completion_status == "未达成" for it in r1_3.check_items):
-                improvement_parts.append("Lab 1-3 源码编译失败未能生成可执行文件")
-            else:
-                p1_3_all_ok = all(it.completion_status == "已达成" for it in r1_3.check_items)
-                if p1_3_all_ok:
-                    success_parts.append("Lab 1-3 温度双向转换逻辑严谨，精确处理了浮点运算与全部边界负温测试")
-                else:
-                    int_div = any("整型截断" in it.deduction_reason for it in r1_3.check_items)
-                    if int_div:
-                        improvement_parts.append("Lab 1-3 华氏转摄氏存在整数除法截断问题（5/9在C语言中得0导致输出为0.00），需使用 5.0/9.0 浮点除法")
-                    else:
-                        failed_1_3 = [it.sub_item for it in r1_3.check_items if it.completion_status in {"未达成", "部分达成"}]
-                        improvement_parts.append(f"Lab 1-3 在{'、'.join(failed_1_3)}上存在未通过用例")
-
-        # 汇总评语
-        comment_parts = [f"{student.name}同学你好！本次实验1综合验收评测如下："]
-        if success_parts:
-            comment_parts.append("已达成项：" + "；".join(success_parts) + "。")
-        if improvement_parts:
-            comment_parts.append("需改进项：" + "；".join(improvement_parts) + "。")
-        if review_parts:
-            comment_parts.append("待核验项：" + "；".join(review_parts) + "。")
-
-        if not improvement_parts and not review_parts and success_parts:
-            comment_parts.append("各项检查分项均已圆满达成，展现了良好的编程规范与严谨态度，请继续保持！")
-        elif improvement_parts:
-            comment_parts.append("请对照上述各检查分项的具体反馈与扣分建议修正代码细节，加强对基本语法与运算特性的理解。")
-        else:
-            comment_parts.append("实验基本要求已达成，请继续保持扎实作风。")
-
-        full_comment = "".join(comment_parts)
-        if len(full_comment) < 50:
-            full_comment += "后续实验请继续注重代码健壮性、边界用例自测与手写推导规范。"
-
-        return full_comment
+                parts.append(f"Lab {pid}未取得可编译源码，请依据对应提交项核对。")
+            for item in prob.check_items:
+                if item.deduction and item.deduction > 0 and item.sub_item not in {"源码提交", "编译与运行"}:
+                    parts.append(f"{item.sub_item}：{item.deduction_reason}。")
+            if pid == "1-2" and prob.ai_review and not prob.ai_review.get("is_pending") and any(i.sub_item == "验算材料提交" and i.submission_status == "已提交" for i in prob.check_items):
+                parts.append(f"手写验算按确认政策评为{prob.sub_scores.get('handwritten', 0.0):.2f}/1.50分，个人信息漏写和过程简写不作酌情扣分。")
+            if prob.needs_review:
+                parts.append("待复核：" + "；".join(dict.fromkeys(prob.review_reasons)) + "。")
+        parts.append("请对照各项输入、输出与验算证据核对反馈，已确认错误按对应检查项计分。")
+        return "".join(parts)
